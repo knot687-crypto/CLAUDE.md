@@ -1,0 +1,266 @@
+/*
+  =============================================================================
+   EIDETIC ADAPTIVE RIGHT STICK  v1.1          Cronus Zen  (Zen Studio, 32-bit)
+  =============================================================================
+
+   WHAT IT DOES
+   - Watches every right stick movement you make and remembers it while the
+     script is running:
+       * short-term memory : the last few seconds (what you are doing now)
+       * long-term memory  : everything since the script was loaded
+   - About 15 times a second it works out a brand new response curve from that
+     memory, so the curve is never the same twice: it keeps following the way
+     you move the stick.
+   - The maths: each output speed gets stick travel in proportion to the cube
+     root of how often you use it. This is the error-minimising "companding"
+     law from signal processing. The speeds you use most get the most stick
+     travel, so they are the easiest to control precisely.
+   - Lowest latency: the stick is read and written in the same 1 ms loop. There
+     is no smoothing filter and no prediction. The curve maths is split into
+     small steps across loops, so no loop is ever slow. Output uses the Zen's
+     high-resolution polar output (0-32767), not 1 % steps.
+   - No buttons, no menus, nothing saved. Load it and play. It starts linear and
+     shapes itself to you within the first minute.
+
+   SETUP
+   - Set the game's right stick response curve to LINEAR if it has one.
+   - Set the game's right stick deadzone as low as it goes without drift and
+     put the same number in GAME_DZ below.
+  =============================================================================
+*/
+
+// ============================== USER SETTINGS ===============================
+define DZ_IN          = 4;     // stick deadzone in %. Raise it if your aim drifts
+define OUTER_DZ       = 98;    // % of stick travel that already counts as full speed
+define GAME_DZ        = 0;     // your in-game right stick deadzone in % (0 if unsure)
+define ADAPT_STRENGTH = 70;    // 0 = plain linear ... 100 = fully learned curve
+define STM_SECONDS    = 8;     // short-term memory length: lower = reacts faster
+define STM_WEIGHT     = 40;    // % pull of short-term memory against long-term memory
+define LTM_HALF_MIN   = 120;   // long-term memory half-life, in minutes of stick use
+define MORPH_MS       = 1500;  // how gently the live curve blends into each new curve
+define VM_SPEED       = -9;    // -9 = 1 ms loop (fastest). Use -6 (4 ms) if your Zen struggles
+
+// ======================= INTERNALS (no need to edit) ========================
+define NB        = 40;         // memory bins = curve segments
+define NK        = 41;         // curve knots (NB + 1)
+define UMAX      = 32000;      // curve input range
+define SEGW      = 800;        // input units per segment (UMAX / NB)
+define YMAX      = 10000;      // curve output range (0.01 % steps)
+define YSTEP     = 250;        // output units per bin (YMAX / NB)
+define UNI       = 410;        // uniform share of one bin (16384 / NB)
+define PFLOOR    = 40;         // prior floor: no bin is ever treated as unused
+define STM_SCALE = 8;          // short-term memory fixed-point scale
+define STM_HALF  = 12000;      // short-term memory confidence half point
+define LTM_HALF  = 120000;     // long-term memory confidence half point (2 min)
+define RAD_MAX   = 32767;      // full polar radius
+
+int ltm[NB];          // long-term memory: ms of use per output-speed bin
+int stm[NB];          // short-term memory: decays within seconds
+int acc[NB];          // fresh samples waiting to be folded into memory
+int pb[NB];           // mixed usage share per bin (16384 = 100 %)
+int cum[NK];          // integrated cube-root weights (the inverse curve)
+int crv[NK];          // LIVE curve: output 0..YMAX at evenly spaced input knots
+
+int dt, cyc_ms, still_ms;
+int dz_r, outer_r, gdz_r, stm_tau, ltm_limit, adapt_k, stm_w, morph_ms;
+int rs_ang, rs_rad, rs_u, rs_seg, rs_frac, rs_dy, rs_y, rs_out, rs_bin, last_rad, last_ang;
+int tl_tot, ts_tot, tl_next, ts_next, w_uni, w_ltm, w_stm, stm_decay, morph_q;
+int rb_ph, rb_i, rb_j, rb_a, rb_d, rb_l, rb_r, rb_p, rb_x, rb_c, rb_t, rb_halve;
+int sh_r, cb_lo, cb_hi, cb_mid;
+int ii;
+
+init {
+    // Settings are copied into variables and range-checked here, so a
+    // setting of 0 is handled at runtime instead of as a constant expression.
+    dz_r = DZ_IN;
+    if (dz_r < 0) dz_r = 0;
+    if (dz_r > 50) dz_r = 50;
+    dz_r = (dz_r * RAD_MAX) / 100;
+    outer_r = OUTER_DZ;
+    outer_r = (outer_r * RAD_MAX) / 100;
+    if (outer_r > RAD_MAX) outer_r = RAD_MAX;
+    if (outer_r < dz_r + 1000) outer_r = dz_r + 1000;
+    gdz_r = GAME_DZ;
+    if (gdz_r < 0) gdz_r = 0;
+    if (gdz_r > 50) gdz_r = 50;
+    gdz_r = (gdz_r * RAD_MAX) / 100;
+    adapt_k = ADAPT_STRENGTH;
+    if (adapt_k < 0) adapt_k = 0;
+    if (adapt_k > 100) adapt_k = 100;
+    stm_w = STM_WEIGHT;
+    if (stm_w < 0) stm_w = 0;
+    if (stm_w > 100) stm_w = 100;
+    morph_ms = MORPH_MS;
+    if (morph_ms < 50) morph_ms = 50;
+    stm_tau = STM_SECONDS;
+    stm_tau = stm_tau * 1000;
+    if (stm_tau < 1000) stm_tau = 1000;
+    if (stm_tau > 30000) stm_tau = 30000;
+    ltm_limit = LTM_HALF_MIN;
+    ltm_limit = ltm_limit * 120000;          // halve memory at 2 x half-life
+    if (ltm_limit < 120000) ltm_limit = 120000;
+    if (ltm_limit > 60000000) ltm_limit = 60000000;
+
+    for (ii = 0; ii < NK; ii++) crv[ii] = ii * YSTEP;   // start linear
+    update_weights();
+    morph_q = 1;          // real rates are set at the end of the first cycle
+    stm_decay = 0;
+}
+
+main {
+    vm_tctrl(VM_SPEED);
+
+    dt = get_rtime();
+    if (dt < 1) dt = 1;
+    if (dt > 50) dt = 50;
+
+    rs_ang = get_ipolar(POLAR_RS, POLAR_ANGLE);
+    rs_rad = get_ipolar(POLAR_RS, POLAR_RADIUS);
+
+    // Motion detector: memory only learns while the stick is actually being
+    // worked, so a resting thumb or a slightly drifting stick is not learned.
+    if (abs(rs_rad - last_rad) > 96 || (rs_ang != last_ang && rs_rad > dz_r)) {
+        still_ms = 0;
+        last_rad = rs_rad;
+        last_ang = rs_ang;
+    } else if (still_ms < 60000) {
+        still_ms += dt;
+    }
+
+    if (rs_rad > dz_r && rs_rad < RAD_MAX && rs_ang >= 0 && rs_ang < 360) {
+        // Curve lookup: deadzone-normalised radius -> live curve -> output.
+        rs_u = ((rs_rad - dz_r) * UMAX) / (outer_r - dz_r);
+        if (rs_u > UMAX) rs_u = UMAX;
+        rs_seg = rs_u / SEGW;
+        if (rs_seg > NB - 1) rs_seg = NB - 1;
+        rs_frac = rs_u - rs_seg * SEGW;
+        rs_dy = crv[rs_seg + 1] - crv[rs_seg];
+        if (rs_dy < 0) rs_dy = 0;
+        rs_y = crv[rs_seg] + (rs_dy * rs_frac) / SEGW;
+        rs_out = gdz_r + (rs_y * (RAD_MAX - gdz_r)) / YMAX;
+        if (rs_out > RAD_MAX) rs_out = RAD_MAX;
+        set_polar(POLAR_RS, rs_ang, rs_out);
+
+        // Remember the speed you asked for (the output).
+        if (rs_rad < outer_r && still_ms < 1000) {
+            rs_bin = (rs_y * NB) / (YMAX + 1);
+            acc[rs_bin] += dt;
+        }
+    } else if (rs_rad >= 0 && rs_rad <= dz_r) {
+        set_polar(POLAR_RS, 0, 0);                  // inside deadzone
+    }
+    // Full deflection or an unexpected reading: the stick is left untouched.
+
+    // Background learning: two small steps per loop, never blocks the stick.
+    cyc_ms += dt;
+    rebuild_step();
+    rebuild_step();
+}
+
+// One small step of the curve builder. Four phases, about 120 steps a cycle:
+//   0: fold fresh samples into short/long-term memory, mix into usage shares
+//   1: smooth, add prior floor, cube root (optimal companding), integrate
+//   2: invert into a forward curve and blend the live curve toward it
+//   3: end of cycle: totals, slow memory fade, weights, time-based rates
+function rebuild_step() {
+    if (rb_ph == 0) {
+        rb_a = acc[rb_i];
+        acc[rb_i] = 0;
+        if (rb_halve) ltm[rb_i] = ltm[rb_i] / 2;
+        ltm[rb_i] += rb_a;
+        rb_d = (stm[rb_i] * stm_decay) / 65536;
+        if (rb_d < 1 && stm[rb_i] > 0) rb_d = 1;
+        stm[rb_i] = stm[rb_i] - rb_d + rb_a * STM_SCALE;
+        tl_next += ltm[rb_i];
+        ts_next += stm[rb_i];
+        pb[rb_i] = (w_uni * UNI + w_ltm * share_of(ltm[rb_i], tl_tot) + w_stm * share_of(stm[rb_i], ts_tot)) / 100;
+        rb_i++;
+        if (rb_i >= NB) {
+            rb_i = 0;
+            rb_ph = 1;
+            cum[0] = 0;
+        }
+    } else if (rb_ph == 1) {
+        if (rb_i > 0) rb_l = pb[rb_i - 1];
+        else rb_l = pb[rb_i];
+        if (rb_i < NB - 1) rb_r = pb[rb_i + 1];
+        else rb_r = pb[rb_i];
+        rb_p = (rb_l + 2 * pb[rb_i] + rb_r) / 4 + PFLOOR;
+        cum[rb_i + 1] = cum[rb_i] + icbrt(rb_p * 65536);
+        rb_i++;
+        if (rb_i >= NB) {
+            rb_i = 0;
+            rb_j = 0;
+            rb_ph = 2;
+        }
+    } else if (rb_ph == 2) {
+        rb_x = (rb_i * cum[NB]) / NB;
+        while (rb_j < NB - 1 && cum[rb_j + 1] < rb_x) rb_j++;
+        rb_c = cum[rb_j + 1] - cum[rb_j];
+        if (rb_c < 1) rb_c = 1;
+        rb_t = rb_j * YSTEP + ((rb_x - cum[rb_j]) * YSTEP) / rb_c;
+        if (rb_t > YMAX) rb_t = YMAX;
+        if (rb_t < 0) rb_t = 0;
+        rb_t = ((100 - adapt_k) * rb_i * YSTEP + adapt_k * rb_t) / 100;
+        if (rb_i == 0) {
+            crv[0] = 0;
+        } else if (rb_i == NB) {
+            crv[NB] = YMAX;
+        } else {
+            crv[rb_i] += ((rb_t - crv[rb_i]) * morph_q) / 65536;
+            if (crv[rb_i] < crv[rb_i - 1]) crv[rb_i] = crv[rb_i - 1];
+        }
+        rb_i++;
+        if (rb_i > NB) rb_ph = 3;
+    } else {
+        tl_tot = tl_next;
+        ts_tot = ts_next;
+        tl_next = 0;
+        ts_next = 0;
+        rb_halve = FALSE;
+        if (tl_tot > ltm_limit) {          // long-term memory fades very slowly
+            rb_halve = TRUE;
+            tl_tot = tl_tot / 2;
+        }
+        update_weights();
+        if (cyc_ms < 1) cyc_ms = 1;
+        stm_decay = (cyc_ms * 65536) / stm_tau;
+        if (stm_decay > 8192) stm_decay = 8192;
+        morph_q = (cyc_ms * 65536) / morph_ms;
+        if (morph_q > 65536) morph_q = 65536;
+        if (morph_q < 1) morph_q = 1;
+        cyc_ms = 0;
+        rb_i = 0;
+        rb_ph = 0;
+    }
+}
+
+// How much each memory counts: short-term up to STM_WEIGHT %, long-term most
+// of the rest, both growing with the amount of data. Remainder stays linear.
+function update_weights() {
+    w_stm = (stm_w * ts_tot) / (ts_tot + STM_HALF);
+    w_ltm = ((100 - w_stm) * (tl_tot / 16)) / ((tl_tot + LTM_HALF) / 16);
+    w_uni = 100 - w_stm - w_ltm;
+}
+
+// Share of a bin value in a total, scaled so 16384 = 100 %, overflow-safe.
+function share_of(sh_v, sh_t) {
+    if (sh_t <= 0) return UNI;
+    if (sh_t < 16384) sh_r = (sh_v * 16384) / sh_t;
+    else if (sh_t < 8388608) sh_r = (sh_v * 128) / (sh_t / 128);
+    else sh_r = (sh_v * 32) / (sh_t / 512);
+    if (sh_r > 16384) sh_r = 16384;
+    return sh_r;
+}
+
+// Integer cube root (binary search, valid up to 1.33 billion).
+function icbrt(cb_n) {
+    cb_lo = 0;
+    cb_hi = 1100;
+    while (cb_hi - cb_lo > 1) {
+        cb_mid = (cb_lo + cb_hi) / 2;
+        if (cb_mid * cb_mid * cb_mid <= cb_n) cb_lo = cb_mid;
+        else cb_hi = cb_mid;
+    }
+    return cb_lo;
+}
