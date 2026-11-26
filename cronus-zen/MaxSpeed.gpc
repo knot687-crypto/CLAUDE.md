@@ -1,0 +1,136 @@
+/* ==========================================================================
+ *  MaxSpeed.gpc  -  lowest-latency passthrough for Cronus Zen
+ * ==========================================================================
+ *  Works with any console and controller. PS4_* names are the same slots
+ *  as XB1_*: R2 = RT, L2 = LT, RX/RY = right stick, LX/LY = left stick.
+ *
+ *  WHAT MAKES IT FAST
+ *   1. 1 ms cycle      vm_tctrl(-9). The Zen builds the report it sends to
+ *                      the console at the end of every main pass. Default
+ *                      is every 10 ms; this makes it every 1 ms, the
+ *                      fastest the firmware allows.
+ *   2. Rapid triggers  L2/R2 count as pressed after ~7 % of pull and as
+ *                      released after ~12 % of let-off from wherever your
+ *                      finger is. No waiting for full travel either way.
+ *   3. Anti-deadzone   sticks jump past the game's built-in deadzone the
+ *                      moment they move. Radial, so aim direction is kept.
+ *   4. Edge snap       95 % deflection is sent as 100 %, so max turn and
+ *                      run speed kick in sooner.
+ *   5. Lean code       integer math only, every constant folded by the
+ *                      compiler, no functions, combos, wait(), OLED or
+ *                      trace writes. A stick at rest costs one compare
+ *                      (squared radius, so no square root until it moves).
+ *
+ *  Buttons and the d-pad are on/off signals. They are never touched, so
+ *  nothing sits in their path; the 1 ms cycle is what speeds them up.
+ *
+ *  If the Zen ever acts unstable, change vm_tctrl(-9) to vm_tctrl(-8)
+ *  (2 ms). Cronus warns that faster cycles can destabilise scripts.
+ * ========================================================================== */
+
+// ---- Switches: 1 = on, 0 = off --------------------------------------------
+define RAPID_R2 = 1;    // R2/RT. Set 0 where you need analog throttle (racing, vehicles)
+define RAPID_L2 = 1;    // L2/LT
+define FAST_RS  = 1;    // right stick (aim)
+define FAST_LS  = 1;    // left stick (move)
+
+// ---- Trigger tuning (percent of trigger travel) ----------------------------
+define TRIG_PRESS   = 6;    // pressed once pulled more than this past the shallowest point
+                            // (6 = fires at 7 % from rest and ignores +-3 % finger jitter;
+                            //  4 fires sooner but can flicker if your finger rests on it)
+define TRIG_RELEASE = 12;   // released once let off more than this from the deepest point
+                            // (raise it if full-auto fire cuts out during long sprays)
+define TRIG_FLOOR   = 2;    // at or below this the trigger always counts as released
+
+// ---- Stick tuning (percent of stick travel) --------------------------------
+define RS_ADZ = 10;   // right stick: the game's deadzone. Jumpy? lower it. Dead spot? raise it.
+define LS_ADZ = 10;   // left stick: the game's deadzone
+define DRIFT  = 4;    // stick noise to ignore. View creeps with hands off? raise by 1-2.
+define OUTER  = 95;   // from this deflection on, send full 100 %
+                      // keep DRIFT < OUTER and DRIFT <= RS_ADZ / LS_ADZ
+
+// ---- Derived: computed by the compiler, zero cost at run time --------------
+define DRIFT_SQ = (DRIFT * DRIFT);
+define SPAN     = (OUTER - DRIFT);
+define RS_GAIN  = (100 - RS_ADZ);
+define LS_GAIN  = (100 - LS_ADZ);
+
+int v, sx, sy, sq, rad, tgt;    // scratch
+int r2On, r2Pk, l2On, l2Pk;     // trigger state: pressed flag + anchor point
+
+main {
+    vm_tctrl(-9);   // 10 ms base - 9 = 1 ms. Applies to the next pass, so it runs every pass.
+    // set_val(TRACE_1, get_rtime());   // debug only: TRACE_1 should read 1 (ms per pass)
+
+    // ===== R2 / RT : rapid trigger ==========================================
+    if(RAPID_R2) {
+        v = get_val(PS4_R2);
+        if(r2On) {
+            if(v > r2Pk) {
+                r2Pk = v;                                   // still pulling: track deepest point
+            } else if((v <= TRIG_FLOOR) || (v < r2Pk - TRIG_RELEASE)) {
+                r2On = 0;                                   // let off: released now
+                r2Pk = v;
+            }
+        } else if(v < r2Pk) {
+            r2Pk = v;                                       // still letting off: track shallowest point
+        } else if(v > r2Pk + TRIG_PRESS) {
+            r2On = 1;                                       // pulled: pressed now
+            r2Pk = v;
+        }
+        set_val(PS4_R2, r2On * 100);
+    }
+
+    // ===== L2 / LT : rapid trigger ==========================================
+    if(RAPID_L2) {
+        v = get_val(PS4_L2);
+        if(l2On) {
+            if(v > l2Pk) {
+                l2Pk = v;
+            } else if((v <= TRIG_FLOOR) || (v < l2Pk - TRIG_RELEASE)) {
+                l2On = 0;
+                l2Pk = v;
+            }
+        } else if(v < l2Pk) {
+            l2Pk = v;
+        } else if(v > l2Pk + TRIG_PRESS) {
+            l2On = 1;
+            l2Pk = v;
+        }
+        set_val(PS4_L2, l2On * 100);
+    }
+
+    // ===== Right stick : radial anti-deadzone + edge snap ===================
+    if(FAST_RS) {
+        sx = get_val(PS4_RX);
+        sy = get_val(PS4_RY);
+        sq = sx * sx + sy * sy;                             // squared radius: no root needed to test it
+        if((sq > DRIFT_SQ) && (sq < 10000)) {               // moving, and not already at full deflection
+            rad = isqrt(sq);
+            if(rad >= OUTER) {
+                tgt = 100;                                  // edge snap
+            } else {
+                tgt = RS_ADZ + ((rad - DRIFT) * RS_GAIN) / SPAN;   // DRIFT..OUTER -> ADZ..100
+            }
+            set_val(PS4_RX, (sx * tgt) / rad);              // same direction, new length
+            set_val(PS4_RY, (sy * tgt) / rad);
+        }
+    }
+
+    // ===== Left stick : radial anti-deadzone + edge snap ====================
+    if(FAST_LS) {
+        sx = get_val(PS4_LX);
+        sy = get_val(PS4_LY);
+        sq = sx * sx + sy * sy;
+        if((sq > DRIFT_SQ) && (sq < 10000)) {
+            rad = isqrt(sq);
+            if(rad >= OUTER) {
+                tgt = 100;
+            } else {
+                tgt = LS_ADZ + ((rad - DRIFT) * LS_GAIN) / SPAN;
+            }
+            set_val(PS4_LX, (sx * tgt) / rad);
+            set_val(PS4_LY, (sy * tgt) / rad);
+        }
+    }
+}
