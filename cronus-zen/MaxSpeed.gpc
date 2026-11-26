@@ -9,12 +9,12 @@
  *                      the console at the end of every main pass. Default
  *                      is every 10 ms; this makes it every 1 ms, the
  *                      fastest the firmware allows.
- *   2. Rapid triggers  L2/R2 count as pressed after ~7 % of pull and as
- *                      released after ~12 % of let-off from wherever your
+ *   2. Rapid triggers  L2/R2 count as pressed after ~5 % of pull and as
+ *                      released after ~8 % of let-off from wherever your
  *                      finger is. No waiting for full travel either way.
  *   3. Anti-deadzone   sticks jump past the game's built-in deadzone the
  *                      moment they move. Radial, so aim direction is kept.
- *   4. Edge snap       95 % deflection is sent as 100 %, so max turn and
+ *   4. Edge snap       90 % deflection is sent as 100 %, so max turn and
  *                      run speed kick in sooner.
  *   5. Lean code       integer math only, every constant folded by the
  *                      compiler, no functions, combos, wait(), OLED or
@@ -35,18 +35,19 @@ define FAST_RS  = 1;    // right stick (aim)
 define FAST_LS  = 1;    // left stick (move)
 
 // ---- Trigger tuning (percent of trigger travel) ----------------------------
-define TRIG_PRESS   = 6;    // pressed once pulled more than this past the shallowest point
-                            // (6 = fires at 7 % from rest and ignores +-3 % finger jitter;
-                            //  4 fires sooner but can flicker if your finger rests on it)
-define TRIG_RELEASE = 12;   // released once let off more than this from the deepest point
-                            // (raise it if full-auto fire cuts out during long sprays)
+define TRIG_PRESS   = 4;    // pressed once pulled more than this past the shallowest point
+                            // (4 = fires at 5 % from rest, ignores +-2 % finger jitter.
+                            //  Trigger fires by itself when your finger rests on it? set 6)
+define TRIG_RELEASE = 8;    // released once let off more than this from the deepest point
+                            // (full-auto stutters mid-spray? set 12, or turn off the
+                            //  controller's trigger effects)
 define TRIG_FLOOR   = 2;    // at or below this the trigger always counts as released
 
 // ---- Stick tuning (percent of stick travel) --------------------------------
 define RS_ADZ = 10;   // right stick: the game's deadzone. Jumpy? lower it. Dead spot? raise it.
 define LS_ADZ = 10;   // left stick: the game's deadzone
 define DRIFT  = 4;    // stick noise to ignore. View creeps with hands off? raise by 1-2.
-define OUTER  = 95;   // from this deflection on, send full 100 %
+define OUTER  = 90;   // from this deflection on, send full 100 % (95 = finer control at the edge)
                       // keep DRIFT < OUTER and DRIFT <= RS_ADZ / LS_ADZ
 
 // ---- Derived: computed by the compiler, zero cost at run time --------------
@@ -56,7 +57,7 @@ define RS_GAIN  = (100 - RS_ADZ);
 define LS_GAIN  = (100 - LS_ADZ);
 
 int v, sx, sy, sq, rad, tgt;    // scratch
-int r2On, r2Pk, l2On, l2Pk;     // trigger state: pressed flag + anchor point
+int r2On, r2Pk, l2On, l2Pk;     // trigger state: output ready to send (0 or 100) + anchor point
 
 main {
     vm_tctrl(-9);   // 10 ms base - 9 = 1 ms. Applies to the next pass, so it runs every pass.
@@ -75,10 +76,10 @@ main {
         } else if(v < r2Pk) {
             r2Pk = v;                                       // still letting off: track shallowest point
         } else if(v > r2Pk + TRIG_PRESS) {
-            r2On = 1;                                       // pulled: pressed now
+            r2On = 100;                                     // pulled: pressed now
             r2Pk = v;
         }
-        set_val(PS4_R2, r2On * 100);
+        set_val(PS4_R2, r2On);                              // already 0 or 100: no math here
     }
 
     // ===== L2 / LT : rapid trigger ==========================================
@@ -94,10 +95,10 @@ main {
         } else if(v < l2Pk) {
             l2Pk = v;
         } else if(v > l2Pk + TRIG_PRESS) {
-            l2On = 1;
+            l2On = 100;
             l2Pk = v;
         }
-        set_val(PS4_L2, l2On * 100);
+        set_val(PS4_L2, l2On);
     }
 
     // ===== Right stick : radial anti-deadzone + edge snap ===================
