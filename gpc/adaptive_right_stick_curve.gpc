@@ -1,0 +1,259 @@
+/* =============================================================================
+    ADAPTIVE RIGHT STICK CURVE + MICRO FORWARD ADJUSTMENT
+    Cronus Zen - Zen Studio - firmware 2.1.0 or newer (32-bit variables)
+    PlayStation and Xbox: PS4_RX / PS4_RY are the same inputs as XB1_RX / XB1_RY
+
+    Built from int variables and functions only:
+    no combos, no defines, no data/const tables, no arrays, no loops, no fix32.
+
+    WHAT IT DOES EVERY LOOP
+    1. DISTANCE  Exact distance of the stick from centre (Pythagoras with an
+                 exact integer square root, rounded to nearest 0.01 %).
+    2. DEADZONE  Circular deadzone, rescaled so movement starts at 0 - no jump.
+    3. CURVE     Applied to that distance, never to X and Y separately, so it
+                 is the same curve in every direction and never bends your aim
+                 angle (no diagonal distortion, no snapping to the axes).
+                     curve(n) = (1 - e) * n + e * n^3     0 -> 0, 100% -> 100%
+    4. AUTO      The expo "e" follows how the stick is moving:
+                     slow / fine movement  -> fine curve (more expo, finer centre)
+                     fast outward flicks   -> fast curve (closer to linear)
+                 Blended smoothly over time, so the output never jumps.
+                 Pulling back toward centre is never treated as a flick.
+    5. FORWARD   A minimal push further along the direction you are already
+                 pushing (1.50 %). Fades in over the first 3 % of travel (no
+                 kick at the deadzone edge) and fades out toward full tilt
+                 (top turn speed is unchanged).
+    6. OUTPUT    X and Y get the same scale factor, rounded to nearest:
+                 direction kept, always inside -100..100.
+
+    IN GAME: response curve LINEAR and right stick deadzone at its minimum -
+    this script provides both (a game curve on top would stack). If the stick
+    drifts, raise rs_deadzone below instead of the in-game deadzone.
+
+    Timing comes from get_rtime(), so it behaves the same at any vm_tctrl.
+    UNITS: % settings are written x100  ->  100 = 1.00 %, 10000 = 100 %
+============================================================================= */
+
+// =============================== SETTINGS ====================================
+int rs_deadzone     = 400;   //  4.00 %  circular deadzone (raise if stick drifts)
+int rs_outer        = 9800;  // 98.00 %  stick distance counted as full tilt
+int rs_expo_fine    = 4000;  // 40.00 %  expo for slow, fine aim
+int rs_expo_fast    = 1500;  // 15.00 %  expo for fast flicks (0 = linear)
+int rs_speed_fine   = 150;   //  %/sec   outward speed at/below = 100 % fine curve
+int rs_speed_fast   = 900;   //  %/sec   outward speed at/above = 100 % fast curve
+int rs_attack_ms    = 40;    //  ms      how quickly it adapts toward fast curve
+int rs_release_ms   = 300;   //  ms      how quickly it settles back to fine
+int rs_forward      = 150;   //  1.50 %  forward adjustment (0 = off)
+int rs_forward_fade = 300;   //  3.00 %  travel over which forward fades in
+int rs_window_ms    = 16;    //  ms      stick speed measuring window
+
+// =============================== INTERNAL ====================================
+int rs_on;                   // 1 = 32-bit maths confirmed, script active
+int rs_started;              // 1 after the first loop has read the stick
+int rs_x;   int rs_y;        // raw stick                 -100..100
+int rs_ax;  int rs_ay;       // |x|, |y|                     0..100
+int rs_r;                    // distance, 0.01 % units       0..14142
+int rs_rc;                   // distance capped at outer (speed tracking)
+int rs_n;                    // travel past deadzone         0..10000
+int rs_n2;  int rs_n3;       // n^2, n^3                     0..10000
+int rs_e;                    // live expo                    0..10000
+int rs_c;                    // curve output                 0..10000
+int rs_p;                    // live forward adjustment      0..10000
+int rs_m;                    // final distance               0..10000
+int rs_ox;  int rs_oy;       // output stick              -100..100
+int rs_dt;                   // loop time, ms
+int rs_win;                  // ms collected in current speed window
+int rs_ref;                  // distance at start of the window
+int rs_v;                    // outward speed, %/sec
+int rs_s;   int rs_s2;       // smoothstep workspace
+int rs_goal;                 // adapt target                 0..10000
+int rs_adapt;                // adapt now (0 fine .. 10000 fast)
+int rs_tau; int rs_d; int rs_step; int rs_span;
+int sq_n;   int sq_res;      // square root workspace
+int rd_q;                    // rounded division result
+
+init {
+    // 30000 * 4 survives only with 32-bit variables; otherwise stay pass-through
+    rs_on = 30000;
+    rs_on = rs_on * 4;
+    if (rs_on / 4 == 30000) {
+        rs_on = 1;
+    } else {
+        rs_on = 0;
+    }
+    rs_sanitize();
+}
+
+main {
+    if (rs_on == 1) {
+        rs_run();
+    }
+}
+
+// =============================== FUNCTIONS ===================================
+
+// Keep every setting inside the range the maths is proven safe for.
+function rs_sanitize() {
+    if (rs_deadzone < 0)              { rs_deadzone = 0; }
+    if (rs_deadzone > 9000)           { rs_deadzone = 9000; }
+    if (rs_outer > 10000)             { rs_outer = 10000; }
+    if (rs_outer < rs_deadzone + 100) { rs_outer = rs_deadzone + 100; }
+    if (rs_expo_fine < 0)             { rs_expo_fine = 0; }
+    if (rs_expo_fine > 10000)         { rs_expo_fine = 10000; }
+    if (rs_expo_fast < 0)             { rs_expo_fast = 0; }
+    if (rs_expo_fast > 10000)         { rs_expo_fast = 10000; }
+    if (rs_speed_fine < 0)            { rs_speed_fine = 0; }
+    if (rs_speed_fine > 20000)        { rs_speed_fine = 20000; }
+    if (rs_speed_fast < 0)            { rs_speed_fast = 0; }
+    if (rs_speed_fast > 20000)        { rs_speed_fast = 20000; }
+    if (rs_attack_ms < 0)             { rs_attack_ms = 0; }
+    if (rs_attack_ms > 5000)          { rs_attack_ms = 5000; }
+    if (rs_release_ms < 0)            { rs_release_ms = 0; }
+    if (rs_release_ms > 5000)         { rs_release_ms = 5000; }
+    if (rs_forward < 0)               { rs_forward = 0; }
+    if (rs_forward > 3000)            { rs_forward = 3000; }
+    if (rs_forward_fade < 0)          { rs_forward_fade = 0; }
+    if (rs_forward_fade > 10000)      { rs_forward_fade = 10000; }
+    if (rs_window_ms < 1)             { rs_window_ms = 1; }
+    if (rs_window_ms > 100)           { rs_window_ms = 100; }
+}
+
+// a / b rounded to nearest, halves away from zero (b > 0).
+function rs_rdiv(rd_a, rd_b) {
+    if (rd_a >= 0) {
+        rd_q = (rd_a + rd_b / 2) / rd_b;
+    } else {
+        rd_q = inv((inv(rd_a) + rd_b / 2) / rd_b);
+    }
+    return rd_q;
+}
+
+// One binary digit of the exact square root (sq_bit = a power of 4).
+function rs_sqstep(sq_bit) {
+    if (sq_n >= sq_res + sq_bit) {
+        sq_n   = sq_n - sq_res - sq_bit;
+        sq_res = sq_res / 2 + sq_bit;
+    } else {
+        sq_res = sq_res / 2;
+    }
+}
+
+// Exact square root of sq_v (0 .. 1073741823), rounded to nearest.
+function rs_sqrt(sq_v) {
+    sq_n   = sq_v;
+    sq_res = 0;
+    rs_sqstep(268435456); rs_sqstep(67108864); rs_sqstep(16777216);
+    rs_sqstep(4194304);   rs_sqstep(1048576);  rs_sqstep(262144);
+    rs_sqstep(65536);     rs_sqstep(16384);    rs_sqstep(4096);
+    rs_sqstep(1024);      rs_sqstep(256);      rs_sqstep(64);
+    rs_sqstep(16);        rs_sqstep(4);        rs_sqstep(1);
+    // sq_res = floor(sqrt(v)), sq_n = v - sq_res^2 ; round half up:
+    if (sq_n > sq_res) {
+        sq_res = sq_res + 1;
+    }
+    return sq_res;
+}
+
+// The whole right stick pipeline, once per main loop.
+function rs_run() {
+    // ---- loop time in ms (guarded) ----
+    rs_dt = get_rtime();
+    if (rs_dt < 1)   { rs_dt = 1; }
+    if (rs_dt > 100) { rs_dt = 100; }
+
+    // ---- read the right stick ----
+    rs_x  = get_val(PS4_RX);
+    rs_y  = get_val(PS4_RY);
+    rs_ax = abs(rs_x);
+    rs_ay = abs(rs_y);
+    if (rs_ax > 100) { rs_ax = 100; }
+    if (rs_ay > 100) { rs_ay = 100; }
+
+    // ---- exact distance: 100 * sqrt(x^2 + y^2), 10000 = full tilt ----
+    rs_r = rs_sqrt((rs_ax * rs_ax + rs_ay * rs_ay) * 10000);
+
+    // ---- how is the stick moving? outward speed over a short window ----
+    rs_rc = rs_r;
+    if (rs_rc > rs_outer) { rs_rc = rs_outer; }
+    if (rs_started == 0) {                           // first loop: stick already
+        rs_ref = rs_rc;                              // held is not a flick
+        rs_started = 1;
+    }
+    rs_win = rs_win + rs_dt;
+    if (rs_win >= rs_window_ms) {
+        rs_v = rs_rc - rs_ref;                       // outward travel
+        if (rs_v < 0) { rs_v = 0; }                  // back toward centre: not a flick
+        rs_v = (rs_v * 10 + rs_win / 2) / rs_win;    // -> % per second
+        if (rs_v <= rs_speed_fine) {
+            rs_goal = 0;
+        } else if (rs_v >= rs_speed_fast) {
+            rs_goal = 10000;
+        } else {
+            rs_span = rs_speed_fast - rs_speed_fine;
+            rs_s    = ((rs_v - rs_speed_fine) * 10000 + rs_span / 2) / rs_span;
+            rs_s2   = (rs_s * rs_s + 5000) / 10000;
+            rs_goal = (rs_s2 * (30000 - 2 * rs_s) + 5000) / 10000;  // smoothstep
+        }
+        rs_ref = rs_rc;
+        rs_win = 0;
+    }
+
+    // ---- glide adapt toward goal: 1st order, alpha = 2dt / (2tau + dt) ----
+    if (rs_goal > rs_adapt) {
+        rs_tau = rs_attack_ms;
+    } else {
+        rs_tau = rs_release_ms;
+    }
+    rs_d = rs_goal - rs_adapt;
+    if (rs_tau * 2 <= rs_dt) {
+        rs_step = rs_d;
+    } else {
+        rs_step = rs_rdiv(rs_d * rs_dt * 2, rs_tau * 2 + rs_dt);
+        if (rs_step == 0) {
+            if (rs_d > 0) { rs_step = 1; }
+            if (rs_d < 0) { rs_step = -1; }
+        }
+    }
+    rs_adapt = rs_adapt + rs_step;
+
+    // ---- live expo: fine curve <-> fast curve ----
+    rs_e = (rs_expo_fine * (10000 - rs_adapt) + rs_expo_fast * rs_adapt + 5000) / 10000;
+
+    if (rs_r <= rs_deadzone) {
+        rs_ox = 0;
+        rs_oy = 0;
+    } else {
+        // ---- circular deadzone, rescaled: n = 0..10000 ----
+        if (rs_r >= rs_outer) {
+            rs_n = 10000;
+        } else {
+            rs_span = rs_outer - rs_deadzone;
+            rs_n = ((rs_r - rs_deadzone) * 10000 + rs_span / 2) / rs_span;
+        }
+
+        // ---- expo curve on the distance: c = (1 - e) n + e n^3 ----
+        rs_n2 = (rs_n * rs_n + 5000) / 10000;
+        rs_n3 = (rs_n2 * rs_n + 5000) / 10000;
+        rs_c  = ((10000 - rs_e) * rs_n + rs_e * rs_n3 + 5000) / 10000;
+
+        // ---- minimal forward adjustment along the stick direction ----
+        if (rs_n >= rs_forward_fade) {
+            rs_p = rs_forward;
+        } else {
+            rs_p = (rs_forward * rs_n + rs_forward_fade / 2) / rs_forward_fade;
+        }
+        rs_m = rs_p + ((10000 - rs_p) * rs_c + 5000) / 10000;
+        if (rs_m > 10000) { rs_m = 10000; }
+
+        // ---- same scale on X and Y = exact direction, rounded to nearest ----
+        rs_ox = (rs_ax * rs_m * 2 + rs_r) / (rs_r * 2);
+        rs_oy = (rs_ay * rs_m * 2 + rs_r) / (rs_r * 2);
+        if (rs_ox > 100) { rs_ox = 100; }
+        if (rs_oy > 100) { rs_oy = 100; }
+        if (rs_x < 0) { rs_ox = inv(rs_ox); }
+        if (rs_y < 0) { rs_oy = inv(rs_oy); }
+    }
+
+    set_val(PS4_RX, rs_ox);
+    set_val(PS4_RY, rs_oy);
+}
