@@ -36,6 +36,9 @@ def build(mat, set_name, final_normal=None):
     rough = nt.nodes.new("ShaderNodeTexImage")
     rough.image = img(os.path.join(tex, f"{set_name}_Roughness.png"), True)
     nt.links.new(rough.outputs["Color"], bsdf.inputs["Roughness"])
+    met = nt.nodes.new("ShaderNodeTexImage")
+    met.image = img(os.path.join(tex, f"{set_name}_Metal.png"), True)
+    nt.links.new(met.outputs["Color"], bsdf.inputs["Metallic"])
     bsdf.inputs["Specular IOR Level"].default_value = 0.35
     nm = nt.nodes.new("ShaderNodeNormalMap")
     nm.space = "TANGENT"
@@ -45,7 +48,8 @@ def build(mat, set_name, final_normal=None):
         nt.links.new(nimg.outputs["Color"], nm.inputs["Color"])
         nt.links.new(nm.outputs["Normal"], bsdf.inputs["Normal"])
         return None
-    nimg.image = img(os.path.join(maps, f"{set_name}_sculptnormal.png"), True)
+    clean = os.path.join(maps, f"{set_name}_sculptnormal_clean.png")
+    nimg.image = img(clean if os.path.exists(clean) else os.path.join(maps, f"{set_name}_sculptnormal.png"), True)
     nt.links.new(nimg.outputs["Color"], nm.inputs["Color"])
     bump = nt.nodes.new("ShaderNodeBump")
     bump.inputs["Strength"].default_value = 1.0

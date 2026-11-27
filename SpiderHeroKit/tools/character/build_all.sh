@@ -6,6 +6,7 @@ PY=${PY:-python3}
 $PY sculpt.py 0.006
 $PY retopo.py 60000 36000
 $PY rig.py
+$PY fix_mesh.py
 $PY bake_maps.py 2048
 $PY bake_ao.py 2048
 $PY suit.py
@@ -20,4 +21,5 @@ for n in ("High", "HighRef"):
 bpy.ops.outliner.orphans_purge(do_recursive=True)
 bpy.ops.wm.save_as_mainfile(filepath=p)
 PYEOF
+$PY export.py
 echo "character pipeline complete"

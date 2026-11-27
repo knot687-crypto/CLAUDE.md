@@ -1,5 +1,6 @@
 // Renders QA screenshots of the previewer with headless Chromium.
-//   node tools/preview/shoot.mjs --out <dir> --views "<spec>" [--poses file] [--frames 0,10,20] [--grid N]
+//   node tools/preview/shoot.mjs --out <dir> --views "<spec>" [--poses file] [--frames 0,10,20] [--grid 1]
+//   [--glb out/hero.glb] [--follow 1] [--orient 1]
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -33,7 +34,6 @@ fs.mkdirSync(outDir, { recursive: true });
 const w = +(args.w || 900), h = +(args.h || 900);
 const qs = new URLSearchParams({ w, h, views: args.views || 'front:0,3.4,-9:0,2.8,0:32' });
 if (args.poses) qs.set('poses', args.poses);
-if (args.model) qs.set('model', args.model);
 if (args.follow) qs.set('follow', '1');
 if (args.ground) qs.set('ground', args.ground);
 if (args.exposure) qs.set('exposure', args.exposure);

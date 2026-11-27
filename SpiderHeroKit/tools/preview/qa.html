@@ -12,7 +12,7 @@
 <script type="module">
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { buildCharacter, applyPose, makeStage } from './viewer-core.js';
+import { makeStage } from './viewer-core.js';
 import { loadHero, applyHeroPose, webAttachPoint } from './hero-skinned.js';
 
 const params = new URLSearchParams(location.search);
@@ -32,7 +32,6 @@ const pmrem = new THREE.PMREMGenerator(renderer);
 stage.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
 stage.scene.environmentIntensity = 0.55;
 
-const model = await (await fetch(params.get('model') || 'out/model_view.json')).json();
 
 // views: list of "name:eyeX,eyeY,eyeZ:targetX,targetY,targetZ:fov"
 const views = (params.get('views') || 'front:0,3.4,-9:0,2.8,0:32').split('|').map((v) => {
@@ -48,14 +47,8 @@ if (params.get('grid') === '1') {
   grid.position.y = 0.002;
   stage.scene.add(grid);
 }
-const ch = buildCharacter(model);
-let hero = null;
-if (params.get('glb')) {
-  hero = await loadHero(params.get('glb'));
-  stage.scene.add(hero.wrapper);
-} else {
-  stage.scene.add(ch.root);
-}
+const hero = await loadHero(params.get('glb') || 'out/hero.glb');
+stage.scene.add(hero.wrapper);
 // web line (hand -> anchor)
 const webMat = new THREE.MeshStandardMaterial({ color: 0xf4f6fa, roughness: 0.4, emissive: 0x30343a });
 const webLine = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 1, 8, 1), webMat);
@@ -95,17 +88,12 @@ window.renderView = (viewIndex, frameIndex) => {
   let pose = null;
   if (poseFrames) pose = poseFrames.frames[frameIndex ?? 0];
   let world;
-  if (hero) {
-    applyHeroPose(hero, pose);
-    if (pose && pose.anchor && pose.hand) {
-      const a = webAttachPoint(hero, pose.hand);
-      world = { [pose.hand + 'Hand']: new THREE.Matrix4().makeTranslation(a.x - WEB_ATT[pose.hand].x, a.y - WEB_ATT[pose.hand].y, a.z - WEB_ATT[pose.hand].z) };
-    }
-  } else {
-    world = applyPose(ch, pose);
+  applyHeroPose(hero, pose);
+  if (pose && pose.anchor && pose.hand) {
+    const a = webAttachPoint(hero, pose.hand);
+    world = { [pose.hand + 'Hand']: new THREE.Matrix4().makeTranslation(a.x - WEB_ATT[pose.hand].x, a.y - WEB_ATT[pose.hand].y, a.z - WEB_ATT[pose.hand].z) };
   }
   placeWeb(world, pose && pose.anchor, pose && pose.hand);
-  ch.root.updateMatrixWorld(true);
   const cam = new THREE.PerspectiveCamera(v.fov, W / H, 0.05, 400);
   let target = new THREE.Vector3(...v.target);
   let eye = new THREE.Vector3(...v.eye);
