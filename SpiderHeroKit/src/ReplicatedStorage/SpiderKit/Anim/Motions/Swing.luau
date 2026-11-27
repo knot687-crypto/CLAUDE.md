@@ -144,7 +144,15 @@ function Swing:update(dt: number, ctx: any, out: { number })
 	-- body alignment along the rope, rolled toward the web hand
 	self.alignW = Spring.damp(self.alignW, 1, 0.07, dt)
 	local qx, qy, qz, qw = Quat.fromTo(0, 1, 0, r.X, r.Y, r.Z)
-	qx, qy, qz, qw = Quat.slerp(0, 0, 0, 1, qx, qy, qz, qw, 0.88 * self.alignW)
+	-- follow the rope, but never lie flat: past ~55 deg the body stays more upright and the
+	-- web arm reaches back to the line instead (reads as a swinger, not a body being dragged)
+	local tilt = math.acos(math.clamp(r.Y, -1, 1))
+	local maxTilt = math.rad(55)
+	local follow = 0.88
+	if tilt * follow > maxTilt then
+		follow = maxTilt / tilt
+	end
+	qx, qy, qz, qw = Quat.slerp(0, 0, 0, 1, qx, qy, qz, qw, follow * self.alignW)
 	local rollSign = if side == "Right" then 1 else -1
 	local rx, ry, rz, rw = Quat.fromEulerXYZ(0, 0, math.rad(13) * rollSign)
 	qx, qy, qz, qw = Quat.mul(qx, qy, qz, qw, rx, ry, rz, rw)

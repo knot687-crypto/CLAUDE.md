@@ -36,10 +36,10 @@ end
 
 -- stance spots (HumanoidRootPart space; the wall is the plane z = -WALL_DISTANCE)
 local STANCE = {
-	RightHand = Vector3.new(0.82, 1.32, 0),
-	LeftHand = Vector3.new(-0.82, 1.32, 0),
-	RightFoot = Vector3.new(0.66, -1.55, 0),
-	LeftFoot = Vector3.new(-0.66, -1.55, 0),
+	RightHand = Vector3.new(0.74, 1.72, 0),
+	LeftHand = Vector3.new(-0.74, 1.72, 0),
+	RightFoot = Vector3.new(0.78, -1.22, 0),
+	LeftFoot = Vector3.new(-0.78, -1.22, 0),
 }
 local CONTACT_OFFSET = { Hand = 0.075, Foot = 0.115 } -- wrist/ankle pivot distance from the surface
 local PAIRS = { { "RightHand", "LeftFoot" }, { "LeftHand", "RightFoot" } }
@@ -106,8 +106,8 @@ end
 
 -- Begins a synchronized step for a diagonal pair toward stance spots led by the travel velocity.
 function Wall:stepPair(pair: { string }, rootCF: CFrame, velLocal: Vector3, speed: number)
-	local lead = Vector3.new(velLocal.X, velLocal.Y, 0) * 0.16
-	local dur = math.clamp(0.24 - speed * 0.007, 0.14, 0.24)
+	local lead = Vector3.new(velLocal.X, velLocal.Y, 0) * 0.22
+	local dur = math.clamp(0.2 - speed * 0.012, 0.13, 0.2)
 	for _, name in pair do
 		local limb = self.limbs[name]
 		local kind = if name:find("Hand") then "Hand" else "Foot"
@@ -168,13 +168,13 @@ function Wall:update(dt: number, ctx: any, out: { number })
 	-- decide next step: the pair whose limbs drifted most from their stance spots
 	if not anyStepping[1] and not anyStepping[2] then
 		local worst, worstPair = 0, 0
-		local threshold = if self.speed > 0.5 then 0.24 else 0.12
+		local threshold = if self.speed > 0.5 then 0.2 else 0.12
 		for pi, pair in PAIRS do
 			local drift = 0
 			for _, name in pair do
 				local limb = self.limbs[name]
 				local kind = if name:find("Hand") then "Hand" else "Foot"
-				local want = wallPoint(rootCF, STANCE[name] + Vector3.new(velLocal.X, velLocal.Y, 0) * 0.16, CONTACT_OFFSET[kind])
+				local want = wallPoint(rootCF, STANCE[name] + Vector3.new(velLocal.X, velLocal.Y, 0) * 0.22, CONTACT_OFFSET[kind])
 				drift = math.max(drift, (limb.anchor - want).Magnitude)
 			end
 			-- alternate pairs when both drifted similarly

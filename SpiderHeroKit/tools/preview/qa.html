@@ -80,6 +80,16 @@ function placeWeb(world, anchor, hand) {
   anchorDot.position.copy(b); anchorDot.visible = true;
 }
 
+// scene geometry from the bake (walls, ledges)
+if (poseFrames && poseFrames.scene && poseFrames.scene.boxes) {
+  const wm = new THREE.MeshStandardMaterial({ color: 0x6b7280, roughness: 0.85 });
+  for (const b of poseFrames.scene.boxes) {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(b.size[0], b.size[1], b.size[2]), wm);
+    m.position.set(b.center[0], b.center[1], b.center[2]);
+    m.receiveShadow = true; m.castShadow = true;
+    stage.scene.add(m);
+  }
+}
 window.renderView = (viewIndex, frameIndex) => {
   const v = views[viewIndex];
   let pose = null;

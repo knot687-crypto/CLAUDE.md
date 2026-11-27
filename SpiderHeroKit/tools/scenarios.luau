@@ -179,15 +179,25 @@ do
 		end
 	end
 	local function swingSeg(side, ahead, up, lateral, duration, trick)
+		local released = false
 		return {
 			{ duration, function(sim, dt, t, entered)
 				if entered then
 					attach(sim, side, ahead, up, lateral)
+					released = false
+				end
+				if released then
+					return
 				end
 				swingStep(sim, dt)
+				-- auto-release once the swing passes ~50 deg beyond the anchor (like the controller)
+				if swing and t > 0.4 and SwingPhysics.phase(swing, sim.pos, sim.vel) < -math.rad(50) then
+					released = true
+					release(sim, trick)
+				end
 			end },
 			{ 0.02, function(sim, dt, t, entered)
-				if entered then
+				if entered and not released then
 					release(sim, trick)
 				end
 			end },
@@ -225,6 +235,53 @@ do
 		end
 	end
 	S.swing = { segments = segs }
+end
+
+-- Wall crawl: leap onto a wall, cling, crawl up / sideways / diagonally, idle, wall-jump off
+do
+	local WALL_Z = -2.0
+	local DIST = 0.62
+	local function crawl(vx, vy)
+		return function(sim, dt)
+			sim.vel = Vector3.new(vx, vy, 0)
+			sim.input = Vector3.new(vx, vy, 0).Magnitude > 0 and Vector3.new(vx, vy, 0).Unit or Vector3.zero
+		end
+	end
+	S.wall = {
+		scene = { boxes = { { center = { 0, 30, WALL_Z - 0.5 }, size = { 60, 60, 1 } } } },
+		segments = {
+			{ 0.55, function(sim, dt, t, entered)
+				if entered then
+					sim.pos = Vector3.new(0, 3.3, 6)
+					sim.yaw = 0
+					sim.jump(62, false)
+					sim.vel = Vector3.new(0, 62, -14)
+				end
+			end },
+			{ 1.2, function(sim, dt, t, entered)
+				if entered then
+					sim.state = "WallCrawl"
+					sim.gravity = false
+					sim.pos = Vector3.new(sim.pos.X, sim.pos.Y, WALL_Z + DIST)
+					sim.wallNormal = Vector3.new(0, 0, 1)
+				end
+				sim.vel = Vector3.zero
+				sim.input = Vector3.zero
+			end },
+			{ 2.0, crawl(0, 4.5) },
+			{ 1.6, crawl(4.2, 0) },
+			{ 1.3, crawl(-3.0, 3.0) },
+			{ 1.4, crawl(0, 0) },
+			{ 1.4, function(sim, dt, t, entered)
+				if entered then
+					sim.state = "Air"
+					sim.gravity = true
+					sim.vel = Vector3.new(0, 42, 26)
+					sim.event("WallJump", {})
+				end
+			end },
+		},
+	}
 end
 
 return S
