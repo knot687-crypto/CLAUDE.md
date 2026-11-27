@@ -44,6 +44,8 @@ class("BasePart", "PVInstance", {
 	BackSurface = Enum.SurfaceType.Smooth,
 	RootPriority = 0,
 	CollisionGroup = "Default",
+	AssemblyLinearVelocity = V3(0, 0, 0),
+	AssemblyAngularVelocity = V3(0, 0, 0),
 })
 class("Part", "BasePart", { Shape = Enum.PartType.Block })
 class("SpawnLocation", "Part", { Duration = 10, Neutral = true, Enabled = true, AllowTeamChangeOnTouch = false })
@@ -54,7 +56,7 @@ class("JointInstance", "Instance", { C0 = CFrame.identity, C1 = CFrame.identity,
 class("Motor", "JointInstance", { MaxVelocity = 0, DesiredAngle = 0 })
 class("Motor6D", "Motor")
 class("Weld", "JointInstance")
-class("Attachment", "Instance", { CFrame = CFrame.identity, Visible = false })
+class("Attachment", "Instance", { CFrame = CFrame.identity, Visible = false, Name = "Attachment" })
 class("Humanoid", "Instance", {
 	RigType = Enum.HumanoidRigType.R15,
 	HipHeight = 2,
@@ -74,6 +76,11 @@ class("Humanoid", "Instance", {
 	MaxSlopeAngle = 89,
 	AutomaticScalingEnabled = true,
 	EvaluateStateMachine = true,
+	MoveDirection = V3(0, 0, 0),
+	FloorMaterial = Enum.Material.Plastic,
+	Jump = false,
+	Sit = false,
+	CameraOffset = V3(0, 0, 0),
 })
 class("LuaSourceContainer", "Instance")
 class("BaseScript", "LuaSourceContainer", { Disabled = false })
@@ -100,6 +107,105 @@ for _, s in { "Workspace", "ReplicatedStorage", "ServerScriptService", "ServerSt
 	class(s, "Instance")
 end
 class("DataModel", "Instance")
+Classes.Workspace.props.Gravity = 196.2
+Classes.Workspace.props.CurrentCamera = false
+
+-- signals ---------------------------------------------------------------------------------------
+local Signal = {}
+Signal.__index = Signal
+function Signal.new()
+	return setmetatable({ _handlers = {} }, Signal)
+end
+function Signal:Connect(fn)
+	local conn = { Connected = true }
+	local handlers = self._handlers
+	function conn.Disconnect()
+		conn.Connected = false
+		local i = table.find(handlers, conn)
+		if i then
+			table.remove(handlers, i)
+		end
+	end
+	conn.fn = fn
+	table.insert(handlers, conn)
+	return conn
+end
+function Signal:Once(fn)
+	local c
+	c = self:Connect(function(...)
+		c.Disconnect()
+		fn(...)
+	end)
+	return c
+end
+function Signal:Fire(...)
+	for _, c in table.clone(self._handlers) do
+		if c.Connected then
+			c.fn(...)
+		end
+	end
+end
+function Signal:Wait()
+	error("Signal:Wait cannot yield in the harness", 2)
+end
+
+-- per-class extension points: methods, events (lazily created signals), computed properties
+local ClassMethods, ClassEvents, ClassGetters, ClassSetters = {}, {}, {}, {}
+local function classLookup(tbl, className, key)
+	local c = Classes[className]
+	while c do
+		local t = tbl[c.name]
+		if t and t[key] ~= nil then
+			return t[key]
+		end
+		c = c.super and Classes[c.super]
+	end
+	return nil
+end
+local function extend(tbl, className, entries)
+	tbl[className] = tbl[className] or {}
+	for k, v in entries do
+		tbl[className][k] = v
+	end
+end
+
+-- runtime objects used by the client controller (simulated by tools/sim_controller.luau)
+class("Constraint", "Instance", { Enabled = true, Attachment0 = false, Attachment1 = false })
+class("AlignOrientation", "Constraint", {
+	Mode = Enum.OrientationAlignmentMode.TwoAttachment,
+	RigidityEnabled = false,
+	Responsiveness = 10,
+	MaxTorque = 10000,
+	MaxAngularVelocity = math.huge,
+	CFrame = CFrame.identity,
+	PrimaryAxisOnly = false,
+	ReactionTorqueEnabled = false,
+})
+class("VectorForce", "Constraint", {
+	RelativeTo = Enum.ActuatorRelativeTo.Attachment0,
+	ApplyAtCenterOfMass = false,
+	Force = V3(0, 0, 0),
+})
+class("Beam", "Instance", {
+	Attachment0 = false, Attachment1 = false, Color = {}, Width0 = 1, Width1 = 1, LightEmission = 0,
+	LightInfluence = 1, FaceCamera = false, Segments = 10, Transparency = {}, CurveSize0 = 0, CurveSize1 = 0,
+	Texture = "", Enabled = true,
+})
+class("Sound", "Instance", {
+	SoundId = "", Volume = 0.5, RollOffMaxDistance = 10000, Looped = false, PlaybackSpeed = 1, TimePosition = 0,
+	Playing = false,
+})
+class("Bone", "Attachment", { Transform = CFrame.identity })
+class("Animator", "Instance")
+class("Camera", "Instance", { CFrame = CFrame.identity, FieldOfView = 70 })
+class("Terrain", "Instance")
+class("Player", "Instance", { Character = false, UserId = 0, DisplayName = "" })
+class("PlayerScripts", "Instance")
+for _, svc in { "RunService", "Players", "ContextActionService", "UserInputService", "PhysicsService" } do
+	class(svc, "Instance")
+end
+Classes.UserInputService.props.TouchEnabled = false
+Classes.Players.props.LocalPlayer = false
 
 local function lookupProp(className, key)
 	local c = Classes[className]
@@ -153,6 +259,23 @@ Meta.__index = function(self, key)
 	elseif key == "Health" and className == "Humanoid" then
 		return props.Health or 100
 	end
+	local getter = classLookup(ClassGetters, className, key)
+	if getter then
+		return getter(self)
+	end
+	if classLookup(ClassEvents, className, key) then
+		local ev = rawget(self, "_events")
+		local sig = ev[key]
+		if not sig then
+			sig = Signal.new()
+			ev[key] = sig
+		end
+		return sig
+	end
+	local cm = classLookup(ClassMethods, className, key)
+	if cm then
+		return cm
+	end
 	local m = Methods[key]
 	if m then
 		return m
@@ -188,6 +311,10 @@ local function setParent(self, parent)
 	if parent then
 		table.insert(getChildren(parent), self)
 	end
+	local ev = rawget(self, "_events")
+	if ev and ev.AncestryChanged then
+		ev.AncestryChanged:Fire(self, parent)
+	end
 end
 
 Meta.__newindex = function(self, key, value)
@@ -199,6 +326,11 @@ Meta.__newindex = function(self, key, value)
 	if key == "Position" and isA(className, "BasePart") then
 		local cf = self.CFrame
 		self.CFrame = cf.Rotation + value
+		return
+	end
+	local setter = classLookup(ClassSetters, className, key)
+	if setter then
+		setter(self, value)
 		return
 	end
 	local has, default = lookupProp(className, key)
@@ -258,7 +390,8 @@ function Instance.new(className, parent)
 	local c = Classes[className]
 	while c do
 		for k, v in c.props do
-			if v == false and (k == "PrimaryPart" or k == "Part0" or k == "Part1" or (k == "Value" and className == "ObjectValue")) then
+			if v == false and (k == "PrimaryPart" or k == "Part0" or k == "Part1" or k == "Attachment0" or k == "Attachment1"
+				or k == "Character" or k == "CurrentCamera" or k == "LocalPlayer" or (k == "Value" and className == "ObjectValue")) then
 				refProps[k] = true
 			end
 		end
@@ -274,6 +407,8 @@ function Instance.new(className, parent)
 		_attributes = {},
 		_refProps = refProps,
 		_debugId = nextDebugId,
+		_events = {},
+		_attrSignals = {},
 	}, Meta)
 	if parent then
 		self.Parent = parent
@@ -375,7 +510,24 @@ function Methods.GetFullName(self)
 	return table.concat(names, ".")
 end
 function Methods.SetAttribute(self, name, value)
-	rawget(self, "_attributes")[name] = value
+	local attrs = rawget(self, "_attributes")
+	local old = attrs[name]
+	attrs[name] = value
+	if old ~= value then
+		local sig = rawget(self, "_attrSignals")[name]
+		if sig then
+			sig:Fire()
+		end
+	end
+end
+function Methods.GetAttributeChangedSignal(self, name)
+	local sigs = rawget(self, "_attrSignals")
+	local sig = sigs[name]
+	if not sig then
+		sig = Signal.new()
+		sigs[name] = sig
+	end
+	return sig
 end
 function Methods.GetAttribute(self, name)
 	return rawget(self, "_attributes")[name]
@@ -505,5 +657,11 @@ function Instance.__serialize(root)
 end
 
 Instance.__isA = isA
+Instance.__Signal = Signal
+Instance.__extend = function(kind, className, entries)
+	local tbl = ({ methods = ClassMethods, events = ClassEvents, getters = ClassGetters, setters = ClassSetters })[kind]
+	assert(tbl, "unknown extension kind " .. tostring(kind))
+	extend(tbl, className, entries)
+end
 Instance.__classes = Classes
 return Instance

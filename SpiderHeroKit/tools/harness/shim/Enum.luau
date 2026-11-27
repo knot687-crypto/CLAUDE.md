@@ -7,7 +7,7 @@ local defs = {
 		Pavement = 836, Brick = 848, Pebble = 864, Cobblestone = 880, Rock = 896, Sandstone = 912,
 		CorrodedMetal = 1040, DiamondPlate = 1056, Foil = 1072, Metal = 1088, Grass = 1280,
 		LeafyGrass = 1284, Sand = 1296, Fabric = 1312, Snow = 1328, Mud = 1344, Ground = 1360,
-		Asphalt = 1376, Salt = 1392, Ice = 1536, Glacier = 1552, Glass = 1568, ForceField = 1584,
+		Asphalt = 1376, Salt = 1392, Air = 1792, Ice = 1536, Glacier = 1552, Glass = 1568, ForceField = 1584,
 	},
 	PartType = { Ball = 0, Block = 1, Cylinder = 2, Wedge = 3, CornerWedge = 4 },
 	MeshType = {
@@ -27,6 +27,23 @@ local defs = {
 		PlatformStanding = 14, Dead = 15, Physics = 16, None = 18,
 	},
 	NormalId = { Right = 0, Top = 1, Back = 2, Left = 3, Bottom = 4, Front = 5 },
+	-- runtime (client controller)
+	RaycastFilterType = { Exclude = 0, Include = 1 },
+	OrientationAlignmentMode = { OneAttachment = 0, TwoAttachment = 1 },
+	ActuatorRelativeTo = { Attachment0 = 0, Attachment1 = 1, World = 2 },
+	ContextActionPriority = { Low = 1000, Medium = 2000, Default = 2000, High = 3000 },
+	ContextActionResult = { Sink = 0, Pass = 1 },
+	UserInputState = { Begin = 0, Change = 1, End = 2, Cancel = 3, None = 4 },
+	UserInputType = {
+		MouseButton1 = 0, MouseButton2 = 1, MouseButton3 = 2, MouseWheel = 3, MouseMovement = 4,
+		Touch = 7, Keyboard = 8, Focus = 9, Accelerometer = 10, Gyro = 11, Gamepad1 = 12, None = 18,
+	},
+	KeyCode = {
+		Unknown = 0, Space = 32, C = 99, E = 101, Q = 113, F = 102, LeftShift = 304, LeftControl = 306,
+		ButtonA = 1000, ButtonB = 1001, ButtonX = 1002, ButtonY = 1003, ButtonR1 = 1004, ButtonL1 = 1005,
+		ButtonR2 = 1006, ButtonL2 = 1007, ButtonR3 = 1008, ButtonL3 = 1009,
+	},
+	RenderPriority = { First = 0, Input = 100, Camera = 200, Character = 300, Last = 2000 },
 }
 
 local Enum = {}
