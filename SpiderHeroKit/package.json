@@ -1,0 +1,16 @@
+{
+  "name": "spider-hero-kit",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Spider-hero animation system, character rig and web-swing controller for Roblox. Build tooling runs the real Luau sources in a WASM Luau VM.",
+  "type": "module",
+  "scripts": {
+    "test": "node tools/harness/run.mjs tests/run_all.luau",
+    "build": "node tools/build.mjs",
+    "bake": "node tools/bake.mjs"
+  },
+  "devDependencies": {
+    "@luau-rs/luau": "0.739.0",
+    "three": "0.170.0"
+  }
+}
