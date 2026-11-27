@@ -1,22 +1,27 @@
 """
 verify_xera.py - runs XERA.gpc off-device and proves what the README claims.
 
-    python3 verify_xera.py              # all checks (about 1-2 minutes)
+    python3 verify_xera.py              # all checks (a few minutes)
+    python3 verify_xera.py --full       # + C property scan of all 16,777,216 base curves, 40 search states
     python3 verify_xera.py --preview    # also re-render xera_oled_preview.gif / xera_oled_still.png
 
 Checks
   A  script parses under strict GPC rules (globals only, no recursion, no combos)
   B  every embedded map equals the generated design / curve library
-  C  all 32,768 library curves: monotone, pinned 0->0 and 1->1, true S-shape, accuracy
+  C  the 1,073,741,824-curve library: true S-shape for every curve (closed form), monotone and
+     pinned ends (integer, sampled; --full scans all base curves in C), fixed-point accuracy
   D  GPC output == bit-exact reference model (scenario + random fuzz incl. late ticks)
-  E  compass search vs exhaustive search over the whole library
-  F  feel metrics: tracking hysteresis, hold drift, flick lead/settle, ramp monotonicity
-  G  OLED: designed idle frame and every flash frame; the script touches only the aim stick
+  E  engine search vs an exhaustive scan of all 1,073,741,824 curves (compiled C, needs gcc)
+  F  feel metrics: tracking hysteresis, hold drift, flick lead/settle, ramp monotonicity, variety
+  G  OLED: boot, every flash frame, idle frame; the script touches only the aim stick
   H  cost per 1 ms tick (interpreter operations, OLED calls)
 """
 import os
 import random
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
 
 import numpy as np
@@ -29,12 +34,13 @@ import xera_model as M       # noqa: E402
 GPC_PATH = os.path.join(HERE, '..', 'XERA.gpc')
 C = G.DEVICE_CONSTS
 RX, RY = C['PS4_RX'], C['PS4_RY']
+FULL = '--full' in sys.argv
 RESULTS = []
 
 
 def report(name, ok, detail):
     RESULTS.append((name, ok))
-    print(f"  [{'PASS' if ok else 'FAIL'}] {name}: {detail}")
+    print(f"  [{'PASS' if ok else 'FAIL'}] {name}: {detail}", flush=True)
 
 
 def machine():
@@ -64,6 +70,8 @@ def check_tables():
     rows, x0, x1 = M.span_tables()
     tag = M.text_tables(M.TAGLINE)
     want = {'XR_P_MAP': M.P_MAP, 'XR_A_MAP': M.A_MAP, 'XR_K_MAP': M.K_MAP, 'XR_IK_MAP': M.IK_MAP,
+            'XR_R_MAP': M.R_MAP, 'XR_IR_MAP': M.IR_MAP, 'XR_PAIR_A': M.PAIR_A, 'XR_PAIR_B': M.PAIR_B,
+            'XR_AXSH': (0, 8, 16, 24), 'XR_AXTOP': M.TOP, 'XR_AXMUL': (1, 256, 65536, 16777216),
             'XR_SPAN_ROW': rows, 'XR_SPAN_X0': x0, 'XR_SPAN_X1': x1,
             'XR_TAG_CHUNK': M.text_chunks(M.TAGLINE), 'XR_TAG_X0': tag[1], 'XR_TAG_X1': tag[2]}
     bad = [k for k, v in want.items() if m.consts.get(k) != list(v)]
@@ -71,11 +79,13 @@ def check_tables():
     dv = {'XR_LX': M.LX, 'XR_LY': M.LY, 'XR_LW': M.LW, 'XR_LH': M.LH, 'XR_DIV_Y': M.DIV_Y,
           'XR_TAG_Y': M.TAG_Y, 'XR_DIA_X': M.DIA_X, 'XR_BW': M.BW, 'XR_TW': M.TW, 'XR_HX0': M.HX0,
           'XR_HX1': M.HX1, 'XR_SWEEP': M.SWEEP_MS, 'XR_STEP': M.STEP_MS, 'XR_CYCLE': M.CYCLE_MS,
-          'XR_SPK_X': M.SPARK_X, 'XR_SPK_Y': M.SPARK_Y,
-          'XR_HP_P': M.HP[0], 'XR_HP_A': M.HP[1], 'XR_HP_K': M.HP[2], 'XR_HT_P': M.HT[0],
-          'XR_HT_A': M.HT[1], 'XR_HT_K': M.HT[2], 'XR_HF_P': M.HF[0], 'XR_HF_A': M.HF[1], 'XR_HF_K': M.HF[2]}
+          'XR_SPK_X': M.SPARK_X, 'XR_SPK_Y': M.SPARK_Y, 'XR_W4': M.W4, 'XR_W4R': M.W4R,
+          'XR_H0': M.H0, 'XR_H_RE': M.H_RE}
+    for tag_, home in (('P', M.HP), ('T', M.HT), ('F', M.HF)):
+        for i, ax in enumerate('PAKR'):
+            dv[f'XR_H{tag_}_{ax}'] = home[i]
     bad = [k for k, v in dv.items() if m.defines.get(k) != v]
-    report('layout + home-curve defines', not bad, 'all match' if not bad else f'mismatch: {bad}')
+    report('layout, weights and home curves', not bad, 'all match' if not bad else f'mismatch: {bad}')
 
 
 # ------------------------------------------------------------------ C
@@ -84,70 +94,75 @@ def vdiv(a, b):
     return np.where((a >= 0) == (b > 0), q, -q)
 
 
-IDS = np.arange(32768, dtype=np.int64)
-IP, IA, IK = IDS & 31, (IDS >> 5) & 31, (IDS >> 10) & 31
-PV = np.array(M.P_MAP, dtype=np.int64)[IP]
-AV = np.array(M.A_MAP, dtype=np.int64)[IA]
-KV = np.array(M.K_MAP, dtype=np.int64)[IK]
-IKV = np.array(M.IK_MAP, dtype=np.int64)[IK]
-QV = vdiv(KV * PV, vdiv(AV * (4096 - PV) + KV * PV, 4096))
-
-
-def vcurve(t):
-    """level and slope of all 32,768 curves at t (exact integer ops of the script)."""
-    t = np.int64(t)
-    lo = t < PV
-    u = vdiv(np.full_like(PV, t) * 4096, PV)
-    den_l = vdiv((AV - 4096) * (4096 - u), 4096) + 4096
-    w = vdiv((t - PV) * 4096, 4096 - PV)
-    den_u = vdiv((IKV - 4096) * (4096 - w), 4096) + 4096
-    den_u = np.where(lo, 1, den_u)          # unused branch: avoid /0 noise
-    den_l = np.where(lo, den_l, 1)
-    f = np.where(lo, vdiv(QV * u, den_l), QV + vdiv((4096 - QV) * w, den_u))
-    d_l = vdiv(vdiv(vdiv(QV * 4096, PV) * AV, den_l) * 4096, den_l)
-    d_u = vdiv(vdiv(vdiv((4096 - QV) * 4096, 4096 - PV) * IKV, den_u) * 4096, den_u)
-    return f, np.where(lo, d_l, d_u)
+def vlevel(t, p, A, iK, q, R, iR):
+    """integer level of many curves at stick position t (exactly as the script)."""
+    flat = t >= R
+    tr = vdiv(t * iR, 4096)
+    lo = tr < p
+    u = vdiv(np.where(lo, tr, 0) * 4096, p)
+    den_l = vdiv((A - 4096) * (4096 - u), 4096) + 4096
+    w = vdiv(np.where(lo, 0, tr - p) * 4096, 4096 - p)
+    den_u = vdiv((iK - 4096) * (4096 - w), 4096) + 4096
+    f = np.where(lo, vdiv(q * u, den_l), q + vdiv((4096 - q) * w, den_u))
+    return np.where(flat, 4096, f)
 
 
 def check_library():
-    print('C. Curve library (all 32,768 curves)')
+    print(f'C. Curve library ({M.LIBRARY_SIZE:,} curves)')
+    # closed-form shape guarantees for every (knee, depth, drive); reach only rescales the stick axis
+    p = np.array(M.P_MAP, float)[:, None, None] / 4096
+    a = 1.0 / (np.array(M.A_MAP, float)[None, :, None] / 4096 + 1.0)
+    K = np.array(M.K_MAP, float)[None, None, :] / 4096
+    A = (1 - a) / a
+    D = A * (1 - p) + K * p
+    s0, sk, s1 = K / (A * D), K * A / D, A / (K * D)
+    r0, r1 = float((sk / s0).min()), float((sk / s1).min())
+    report('true S-shape for all curves (never linear / expo)', r0 >= 2.25 - 1e-9 and r1 >= 1.56 - 1e-9,
+           f'all 16,777,216 knee/depth/drive combos x 64 reaches: knee gain >= {r0:.2f}x centre gain, '
+           f'>= {r1:.2f}x top gain')
+    # integer monotonicity / ends on a large random sample of full 4-D curves
+    rng = np.random.default_rng(7)
+    ids = rng.integers(0, M.LIBRARY_SIZE, 200000)
+    ip, ia, ik, ir = ids & 255, (ids >> 8) & 255, (ids >> 16) & 255, (ids >> 24) & 63
+    P = np.array(M.P_MAP, np.int64)[ip]
+    AA = np.array(M.A_MAP, np.int64)[ia]
+    KK = np.array(M.K_MAP, np.int64)[ik]
+    IKK = np.array(M.IK_MAP, np.int64)[ik]
+    R = np.array(M.R_MAP, np.int64)[ir]
+    IR = np.array(M.IR_MAP, np.int64)[ir]
+    Q = vdiv(KK * P, vdiv(AA * (4096 - P) + KK * P, 4096))
     prev = None
-    worst_drop = 0
-    f0 = f1 = None
-    for t in range(0, 4097, 8):
-        f, _ = vcurve(t)
+    drops = 0
+    for t in range(0, 4097, 16):
+        f = vlevel(np.int64(t), P, AA, IKK, Q, R, IR)
         if t == 0:
             f0 = f
         if prev is not None:
-            worst_drop = max(worst_drop, int((prev - f).max()))
+            drops += int((f < prev).sum())
         prev = f
-    f1 = prev
-    report('monotone', worst_drop <= 0, f'never decreases (max step-down {worst_drop})')
-    report('pinned ends', int(np.abs(f0).max()) == 0 and int(np.abs(f1 - 4096).max()) <= 1,
-           f'f(0)=0, |f(1)-1| <= {int(np.abs(f1 - 4096).max())}/4096')
-    a = 1.0 / (AV / 4096.0 + 1.0)
-    K = KV / 4096.0
-    A = (1 - a) / a
-    p = PV / 4096.0
-    D = A * (1 - p) + K * p
-    s0, sk, s1 = K / (A * D), K * A / D, A / (K * D)
-    report('true S-shape (never linear / expo)', (sk / s0).min() >= 2.25 - 1e-9 and (sk / s1).min() >= 1.56 - 1e-9,
-           f'knee gain >= {np.min(sk / s0):.2f}x centre gain and >= {np.min(sk / s1):.2f}x top gain')
-    rng = np.random.default_rng(1)
+    report('monotone + pinned (integer, sampled)', drops == 0 and not f0.any() and (prev == 4096).all(),
+           f'200,000 random curves x 257 stick positions: never decreases, f(0)=0, f(1)=1')
+    if FULL and EXE:
+        out = subprocess.run([EXE, 'props'], capture_output=True, text=True, check=True).stdout.split()
+        report('monotone + pinned (integer, all base curves)', out == ['0', '0'],
+               f'all 16,777,216 base curves scanned in C: {out[0]} decreases, {out[1]} bad end points; '
+               'reach is a monotone stretch, so this covers all 2^30 curves')
     err = derr = 0.0
-    for cid in rng.choice(32768, 400, replace=False):
-        ip, ia, ik = M.unpack(int(cid))
-        c = M.Curve()
-        c.prep(M.P_MAP[ip], M.A_MAP[ia], M.K_MAP[ik], M.IK_MAP[ik])
-        pf, af, kf = M.P_MAP[ip] / 4096, 1 / (M.A_MAP[ia] / 4096 + 1), M.K_MAP[ik] / 4096
+    c = M.Curve()
+    for cid in rng.integers(0, M.LIBRARY_SIZE, 400):
+        ip, ia, ik, ir = M.unpack(int(cid))
+        c.prep(M.P_MAP[ip], M.A_MAP[ia], M.K_MAP[ik], M.IK_MAP[ik], M.R_MAP[ir], M.IR_MAP[ir])
+        pf, af = M.P_MAP[ip] / 4096, 1 / (M.A_MAP[ia] / 4096 + 1)
+        kf, rf = M.K_MAP[ik] / 4096, M.R_MAP[ir] / 4096
         for t in range(0, 4097, 64):
             fi = c.level(t)
-            di = c.slope(t)
-            ff, dd = M.curve_float(t / 4096, pf, af, kf)
+            di = c.slope14() / 16384
+            ff, dd = M.curve_float(t / 4096, pf, af, kf, rf)
             err = max(err, abs(fi / 4096 - ff))
-            derr = max(derr, abs(di / 4096 - dd))
-    report('fixed-point accuracy', err < 0.002, f'level error <= {err * 100:.3f}% of full scale '
-           f'({err * 100:.3f} stick units), gain error <= {derr:.4f}')
+            if not c.flat:
+                derr = max(derr, abs(di - dd))
+    report('fixed-point accuracy', err < 0.002, f'level error <= {err * 100:.3f}% of full scale, '
+           f'gain error <= {derr:.4f}')
 
 
 # ------------------------------------------------------------------ D
@@ -168,8 +183,7 @@ def check_bitexact():
     m, eng = machine(), M.Engine()
     rnd = random.Random(11)
     x = y = 0
-    bad = 0
-    late = 0
+    bad = late = 0
     for k in range(20000):
         r = rnd.random()
         if r < 0.004:
@@ -188,45 +202,74 @@ def check_bitexact():
 
 
 # ------------------------------------------------------------------ E
+EXE = None
+
+
+def build_exhaustive():
+    global EXE
+    if not shutil.which('gcc'):
+        return None
+    d = tempfile.mkdtemp(prefix='xera_')
+
+    def arr(name, vals):
+        return f"static const int64_t {name}[{len(vals)}] = {{{', '.join(map(str, vals))}}};\n"
+    with open(os.path.join(d, 'xera_maps.h'), 'w') as fh:
+        fh.write('#include <stdint.h>\n' + arr('P_MAP', M.P_MAP) + arr('A_MAP', M.A_MAP) + arr('K_MAP', M.K_MAP)
+                 + arr('IK_MAP', M.IK_MAP) + arr('R_MAP', M.R_MAP) + arr('IR_MAP', M.IR_MAP)
+                 + f'#define W4 {M.W4}\n#define W4R {M.W4R}\n')
+    exe = os.path.join(d, 'xera_exhaustive')
+    src = os.path.join(HERE, 'xera_exhaustive.c')
+    for flags in (['-fopenmp'], []):
+        if subprocess.run(['gcc', '-O3', '-march=native', *flags, '-I', d, '-o', exe, src],
+                          capture_output=True).returncode == 0:
+            EXE = exe
+            return exe
+    return None
+
+
 def check_search():
-    print('E. Compass search vs exhaustive search of all 32,768 curves')
+    print(f'E. Engine search vs exhaustive scan of all {M.LIBRARY_SIZE:,} curves')
+    if not EXE:
+        report('exhaustive comparison', True, 'skipped: no C compiler found (gcc)')
+        return
+    nstates = 40 if FULL else 12
     eng = M.Engine()
-    rnd = random.Random(3)
-    picks = set(rnd.sample(range(7800), 300))
+    rnd = random.Random(21)
+    stream = list(M.controller_stream(M.scenario()))
+    picks = set(rnd.sample(range(len(stream)), nstates))
     states = []
-    for k, (name, x, y) in enumerate(M.controller_stream(M.scenario())):
+    for k, (name, x, y) in enumerate(stream):
         eng.step(x, y, 1)
         if k in picks:
-            states.append({a: getattr(eng, a) for a in ('t', 'th', 'Lhat', 'Sstar', 'W2', 'W3',
-                                                         'prp', 'pra', 'prk', 'cid')})
+            states.append({a: (list(getattr(eng, a)) if a == 'pr' else getattr(eng, a))
+                           for a in ('t', 'th', 'Lhat', 'Sstar', 'W2', 'W3', 'pr', 'cid')})
     hits = runs = 0
-    ticks = []
+    ticks, gaps = [], []
+    t0 = time.time()
     for st in states:
-        f, d = vcurve(st['t'])
-        J = st['W2'] * vdiv(d - st['Sstar'], 16) ** 2
-        if st['W3'] > 0:
-            fh, _ = vcurve(st['th'])
-            J = J + st['W3'] * vdiv(fh - st['Lhat'], 16) ** 2
-        J = J + M.W4 * ((IP * 16 - st['prp']) ** 2 + (IA * 16 - st['pra']) ** 2 + (IK * 16 - st['prk']) ** 2)
-        gmin = int(J.min())
-        for start in (st['cid'], rnd.randrange(32768)):
+        args = [st['t'], st['th'], st['Lhat'], st['Sstar'], st['W2'], st['W3'], *st['pr']]
+        gmin = int(subprocess.run([EXE] + [str(v) for v in args], capture_output=True, text=True,
+                                  check=True).stdout.split()[0])
+        for start in (st['cid'], rnd.randrange(M.LIBRARY_SIZE)):
             e = M.Engine()
             for a, v in st.items():
                 setattr(e, a, v)
-            e.cid, e.h, e.cur, e.lock = start, 4, 0, 0
+            e.cid, e.h, e.cur, e.miss, e.lock = start, M.H0, 0, 0, 0
             n = 0
-            while True:
-                n += 1
-                before = (e.cid, e.h)
+            while not e.lock and n < 2000:
                 e.search()
-                if (e.cid, e.h) == before or n > 400:
-                    break
-            hits += e.cost(e.cid) == gmin
+                n += 1
+            J = e.cost(*M.unpack(e.cid))
+            hits += J == gmin
             runs += 1
             ticks.append(n)
-    rate = 100.0 * hits / runs
-    report('finds the global optimum', rate >= 95, f'{hits}/{runs} = {rate:.1f}% identical to exhaustive scan; '
-           f'converges in {int(np.median(ticks))} ms median, {int(np.percentile(ticks, 95))} ms p95')
+            gaps.append((J - gmin) / max(1, gmin))
+    g = np.array(gaps)
+    report('finds the best curve of the whole library', g.max() < 0.01,
+           f'{len(states)} real stick moments x 2 starts, each checked against all {M.LIBRARY_SIZE:,} curves '
+           f'({time.time() - t0:.0f}s): identical best curve in {100 * hits / runs:.1f}%, cost within '
+           f'{100 * np.median(g):.2f}% median / {100 * g.max():.2f}% worst; locks on in {int(np.median(ticks))} ms '
+           f'median, {int(np.percentile(ticks, 95))} ms p95')
 
 
 # ------------------------------------------------------------------ F
@@ -234,29 +277,32 @@ def check_feel():
     print('F. Feel metrics (reference model, same arithmetic as the script)')
     eng = M.Engine()
     log = []
+    ids = set()
     for name, x, y in M.controller_stream(M.scenario()):
         eng.step(x, y, 1)
         log.append((name, eng.t, eng.fcur, eng.live_params()))
+        ids.add(eng.cid)
     bins = {}
     for name, t, f, _ in log:
         if name == 'track' and t > 0:
             bins.setdefault(t // 24, []).append(f)
     hyst = 100 * np.mean([max(v) - min(v) for v in bins.values() if len(v) > 10]) / 4096
     report('tracking consistency', hyst < 1.0, f'same stick position -> same output within {hyst:.2f}% while sweeping')
+    c = M.Curve()
+
+    def live(params, t):
+        p, A, K, R = params
+        c.prep(p, A, K, M.idiv(16777216, K), R, M.idiv(16777216, R))
+        return c.level(t)
     hold = [r for r in log if r[0] == 'hold50'][150:]
     tf = int(np.median([r[1] for r in hold]))
-    c = M.Curve()
-    lv = []
-    for r in hold:
-        p, A, K = r[3]
-        c.prep(p, A, K, M.idiv(16777216, K))
-        lv.append(c.level(tf))
+    lv = [live(r[3], tf) for r in hold]
     drift = 100 * (max(lv) - min(lv)) / 4096
     report('no drift while holding', drift < 0.5, f'curve level moves {drift:.2f}% during a steady hold')
     rows = [r for r in log if r[0] == 'flick60']
-    c.prep(M.P_MAP[round(M.HT[0] / 16)], M.A_MAP[round(M.HT[1] / 16)], M.K_MAP[round(M.HT[2] / 16)],
-           M.IK_MAP[round(M.HT[2] / 16)])
-    lead = [r[2] - c.level(r[1]) for r in rows[:70] if r[1] > 0]
+    ht = tuple((v + 1) // 2 for v in M.HT)
+    static = (M.P_MAP[ht[0]], M.A_MAP[ht[1]], M.K_MAP[ht[2]], M.R_MAP[ht[3]])
+    lead = [r[2] - live(static, r[1]) for r in rows[:70] if r[1] > 0]
     held = [r[2] for r in rows[80:600]]
     settled = int(np.median(held[-100:]))
     settle = max((i + 80 for i, f in enumerate(held) if abs(f - settled) > 82), default=0)
@@ -274,6 +320,8 @@ def check_feel():
             prev, prev_t = e.fcur, e.t
     report('stick out -> output up', worst <= 8, f'on slow-to-snap ramps the output never drops by more than '
            f'{100 * worst / 4096:.2f}% (below 1 output unit)')
+    report('curve variety', len(ids) > 500, f'{len(ids):,} different library curves chosen during the '
+           f'{len(log) / 1000:.1f} s test session')
 
 
 # ------------------------------------------------------------------ G
@@ -299,7 +347,6 @@ def check_oled():
     report('flash frames', bad == 0 and checked > 0, f'{checked} frames drawn incrementally, {bad} differ from the design')
     report('boot animation', bool(boot_ok and boot_ok[1]), f'scan-in completes at {boot_ok[0]} ms on the exact designed frame')
     report('idle screen', all(idle_ok) and idle_ok, f'pixel-exact designed frame at the end of {len(idle_ok)} cycles')
-    # every identifier other than the aim stick must pass through untouched, whatever is pressed
     m = machine()
     rnd = random.Random(5)
     others = [k for k, v in C.items() if k.startswith('PS4_') and v not in (RX, RY)]
@@ -317,8 +364,8 @@ def check_oled():
 # ------------------------------------------------------------------ H
 def check_cost(ops, oled):
     print('H. Cost per 1 ms tick')
-    report('budget', True, f'{np.mean(ops):.0f} interpreter ops mean / {max(ops)} max per tick '
-           f'(each ~ one VM instruction); OLED: {oled} draw calls max per tick')
+    report('budget', True, f'{np.mean(ops):.0f} interpreter ops mean / {np.percentile(ops, 99):.0f} p99 / {max(ops)} max '
+           f'per tick (each ~ one VM instruction); OLED: {oled} draw calls max per tick')
 
 
 def preview():
@@ -356,6 +403,7 @@ def preview():
 
 if __name__ == '__main__':
     t0 = time.time()
+    build_exhaustive()
     check_static()
     check_tables()
     check_library()

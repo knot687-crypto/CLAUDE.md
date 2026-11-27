@@ -4,7 +4,7 @@ xera_model.py - reference model of XERA.gpc.
 * Engine      : a bit-exact Python twin of the GPC stick engine (same integer
                 operations, same C-style truncating division). The verifier
                 runs both side by side and requires identical output.
-* Library     : the 32,768-curve lattice (umaps) and the dual-rational S-curve.
+* Library     : the 1,073,741,824-curve lattice (umaps) and the dual-rational S-curve.
 * Design      : the XERA logotype, the 3x5 micro font and every display table
                 the script embeds, generated from pixel art.
 * Scenarios   : synthetic stick motion (micro-aim, tracking, flicks, holds)
@@ -36,54 +36,77 @@ def chk(v):
 
 
 # ============================================================== curve library
-N = 32
+# 256 knee positions x 256 precision depths x 256 knee drives x 64 reach values = 2^30 curves
+NP = NA = NK = 256
+NR = 64
 P_LO, P_HI = 0.18, 0.70        # knee position p
 a_LO, a_HI = 0.18, 0.40        # lower-segment bias a  (A = (1-a)/a)
 K_LO, K_HI = 1.25, 2.85        # knee drive K (upper bias b = K/(1+K))
-P_MAP = [round(4096 * (P_LO + i * (P_HI - P_LO) / (N - 1))) for i in range(N)]
-A_MAP = [round(4096 * (1 - a) / a) for a in (a_LO + i * (a_HI - a_LO) / (N - 1) for i in range(N))]
-K_MAP = [round(4096 * (K_LO + i * (K_HI - K_LO) / (N - 1))) for i in range(N)]
+R_LO, R_HI = 0.86, 1.00        # reach R (full output from t = R)
+P_MAP = [round(4096 * (P_LO + i * (P_HI - P_LO) / (NP - 1))) for i in range(NP)]
+A_MAP = [round(4096 * (1 - a) / a) for a in (a_LO + i * (a_HI - a_LO) / (NA - 1) for i in range(NA))]
+K_MAP = [round(4096 * (K_LO + i * (K_HI - K_LO) / (NK - 1))) for i in range(NK)]
 IK_MAP = [round(4096 * 4096 / k) for k in K_MAP]
+R_MAP = [round(4096 * (R_LO + i * (R_HI - R_LO) / (NR - 1))) for i in range(NR)]
+IR_MAP = [round(4096 * 4096 / r) for r in R_MAP]
+PAIR_A = (0, 0, 0, 1, 1, 2)
+PAIR_B = (1, 2, 3, 2, 3, 3)
+LIBRARY_SIZE = NP * NA * NK * NR      # 1,073,741,824
 
 
-def curve_float(t, p, a, K):
-    """Float definition of the dual-rational S-curve (for accuracy checks)."""
+def curve_float(t, p, a, K, R=1.0):
+    """Float definition of the dual-rational S-curve with reach R (for accuracy checks)."""
+    if t >= R:
+        return 1.0, 0.0
+    t = t / R
     A = (1 - a) / a
     D = A * (1 - p) + K * p
     q = K * p / D
     if t < p:
         u = t / p
         den = (A - 1) * (1 - u) + 1
-        return q * u / den, (q / p) * A / den ** 2
+        return q * u / den, (q / p) * A / den ** 2 / R
     w = (t - p) / (1 - p)
     den = (1 / K - 1) * (1 - w) + 1
-    return q + (1 - q) * w / den, ((1 - q) / (1 - p)) * (1 / K) / den ** 2
+    return q + (1 - q) * w / den, ((1 - q) / (1 - p)) * (1 / K) / den ** 2 / R
 
 
 class Curve:
-    """Integer evaluation exactly as xr_prep / xr_level / xr_slope."""
+    """Integer evaluation exactly as xr_live / xr_cost."""
 
-    def prep(self, p, A, K, iK):
-        self.p, self.A, self.iK = p, A, iK
+    def prep(self, p, A, K, iK, R=4096, iR=4096):
+        self.p, self.A, self.iK, self.R, self.iR = p, A, iK, R, iR
         self.q = idiv(K * p, idiv(A * (4096 - p) + K * p, 4096))
 
     def level(self, t):
+        if t >= self.R:
+            self.flat = 1
+            return 4096
+        self.flat = 0
+        tr = idiv(t * self.iR, 4096)
         p, A, iK, q = self.p, self.A, self.iK, self.q
-        if t < p:
-            u = idiv(t * 4096, p)
-            self.den = idiv((A - 4096) * (4096 - u), 4096) + 4096
+        if tr < p:
+            u = idiv(tr * 4096, p)
+            self.den, self.lo = idiv((A - 4096) * (4096 - u), 4096) + 4096, 1
             return idiv(q * u, self.den)
-        w = idiv((t - p) * 4096, 4096 - p)
-        self.den = idiv((iK - 4096) * (4096 - w), 4096) + 4096
+        w = idiv((tr - p) * 4096, 4096 - p)
+        self.den, self.lo = idiv((iK - 4096) * (4096 - w), 4096) + 4096, 0
         return q + idiv((4096 - q) * w, self.den)
 
-    def slope(self, t):
+    def slope(self):
+        """f'(t) in Q12 at the t of the last level() call."""
+        return idiv(self.slope14(), 4)
+
+    def slope14(self):
+        """f'(t) in Q14 (the cost uses this finer value)."""
+        if self.flat:
+            return 0
         p, A, iK, q, den = self.p, self.A, self.iK, self.q, self.den
-        if t < p:
-            g = idiv(idiv(q * 4096, p) * A, den)
+        if self.lo:
+            g = idiv(idiv(q * 16384, p) * A, den)
         else:
-            g = idiv(idiv((4096 - q) * 4096, 4096 - p) * iK, den)
-        return idiv(g * 4096, den)
+            g = idiv(idiv((4096 - q) * 16384, 4096 - p) * iK, den)
+        return idiv(idiv(g * 4096, den) * self.iR, 4096)
 
 
 # ============================================================== engine constants
@@ -94,20 +117,21 @@ V_LO, V_HI = 287, 901
 T_LO, T_HI = 410, 1720
 SM_RATE, F_ATK, F_REL, P_RATE, FENV_REL = 24, 4, 6, 16, 96
 W2P, W2T, W2F = 10, 0, 8
-TAU, W3_MAX, W4 = 24, 24, 2
+TAU, W3_MAX = 24, 24
+W4, W4R = 32, 128
+H0, H_RE = 32, 16
 GL_SLOW, GL_FAST = 16, 3
-HP = (248, 271, 109)     # precision home (Q4 lattice coordinates)
-HT = (191, 406, 62)      # tracking home
-HF = (76, 361, 388)      # flick home
 
 
-def home_q4(p, a, K):
-    return tuple(int(round(v * 16)) for v in ((p - P_LO) / (P_HI - P_LO) * (N - 1),
-                                               (a - a_LO) / (a_HI - a_LO) * (N - 1),
-                                               (K - K_LO) / (K_HI - K_LO) * (N - 1)))
+def home_q1(p, a, K, R):
+    return (round(2 * (p - P_LO) / (P_HI - P_LO) * (NP - 1)), round(2 * (a - a_LO) / (a_HI - a_LO) * (NA - 1)),
+            round(2 * (K - K_LO) / (K_HI - K_LO) * (NK - 1)), round(2 * (R - R_LO) / (R_HI - R_LO) * (NR - 1)))
 
 
-assert HP == home_q4(0.44, 0.30, 1.60) and HT == home_q4(0.38, 0.36, 1.45) and HF == home_q4(0.26, 0.34, 2.50)
+HP = home_q1(0.44, 0.30, 1.60, 1.00)     # precision home (Q1 lattice coordinates)
+HT = home_q1(0.38, 0.36, 1.45, 1.00)     # tracking home
+HF = home_q1(0.26, 0.34, 2.50, 0.94)     # flick home
+assert (HP, HT, HF) == ((255, 278, 112, 126), (196, 417, 64, 126), (78, 371, 398, 72))
 
 
 class Settings:
@@ -133,11 +157,28 @@ def ss(e0, e1, x):
 
 
 def unpack(cid):
-    return cid & 31, (cid >> 5) & 31, (cid >> 10) & 31
+    return cid & 255, (cid >> 8) & 255, (cid >> 16) & 255, (cid >> 24) & 63
 
 
-def pack(ip, ia, ik):
-    return ip | (ia << 5) | (ik << 10)
+def pack(ip, ia, ik, ir):
+    return ip | (ia << 8) | (ik << 16) | (ir << 24)
+
+
+TOP = (255, 255, 255, 63)
+
+
+def neighbor(c4, d, h):
+    """Direction d: 0..7 = +/- along knee, depth, drive, reach; 8..31 = two-axis diagonals."""
+    v = list(c4)
+    if d < 8:
+        ax, sgn = d // 2, (1 if d % 2 == 0 else -1)
+        v[ax] = max(0, min(TOP[ax], v[ax] + sgn * h))
+    else:
+        j = d - 8
+        a, b = PAIR_A[j // 4], PAIR_B[j // 4]
+        v[a] = max(0, min(TOP[a], v[a] + (h if j % 4 < 2 else -h)))
+        v[b] = max(0, min(TOP[b], v[b] + (h if j % 2 == 0 else -h)))
+    return tuple(v)
 
 
 class Engine:
@@ -153,12 +194,11 @@ class Engine:
         self.adz = idiv(s.ANTI_DZ * 4096, 100)
         self.xe = self.ye = self.vx = self.vy = self.Sm = 0
         self.iP, self.iF, self.iT, self.Fenv = 4096, 0, 0, 0
-        ip, ia, ik = (HP[0] + 8) // 16, (HP[1] + 8) // 16, (HP[2] + 8) // 16
-        self.cid = pack(ip, ia, ik)
-        self.h, self.cur, self.lock, self.lockS = 4, 0, 0, 0
-        self.g1p = self.g2p = P_MAP[ip] * 16
-        self.g1a = self.g2a = A_MAP[ia] * 16
-        self.g1k = self.g2k = K_MAP[ik] * 16
+        c4 = tuple((v + 1) // 2 for v in HP)
+        self.cid = pack(*c4)
+        self.h, self.cur, self.miss, self.lock, self.lockS = H0, 0, 0, 0, 0
+        self.g1 = [P_MAP[c4[0]] * 16, A_MAP[c4[1]] * 16, K_MAP[c4[2]] * 16, R_MAP[c4[3]] * 16]
+        self.g2 = list(self.g1)
         self.probes, self.okt, self.late = s.PROBES, 0, 0
         self.c = Curve()
         self.evals = 0
@@ -169,63 +209,56 @@ class Engine:
         return c + idiv((g - c) * k, r)
 
     # ---------------- search
-    def cost(self, cid):
+    def cost(self, ip, ia, ik, ir):
         self.evals += 1
-        ip, ia, ik = unpack(cid)
         c = self.c
-        c.prep(P_MAP[ip], A_MAP[ia], K_MAP[ik], IK_MAP[ik])
+        c.prep(P_MAP[ip], A_MAP[ia], K_MAP[ik], IK_MAP[ik], R_MAP[ir], IR_MAP[ir])
         c.level(self.t)
-        e = idiv(c.slope(self.t) - self.Sstar, 16)
+        e = idiv(c.slope14() - 4 * self.Sstar, 16)
         J = self.W2 * e * e
         if self.W3 > 0:
-            e = idiv(c.level(self.th) - self.Lhat, 16)
+            e = idiv(c.level(self.th) - self.Lhat, 4)
             J += self.W3 * e * e
-        for idx, pr in ((ip, self.prp), (ia, self.pra), (ik, self.prk)):
-            e = idx * 16 - pr
-            J += W4 * e * e
+        for idx, pr, w in ((ip, self.pr[0], W4), (ia, self.pr[1], W4), (ik, self.pr[2], W4), (ir, self.pr[3], W4R)):
+            e = 2 * idx - pr
+            J += w * e * e
         return chk(J)
 
-    @staticmethod
-    def neighbor(cid, d, h):
-        ip, ia, ik = unpack(cid)
-        if d == 0:
-            ip = min(31, ip + h)
-        elif d == 1:
-            ip = max(0, ip - h)
-        elif d == 2:
-            ia = min(31, ia + h)
-        elif d == 3:
-            ia = max(0, ia - h)
-        elif d == 4:
-            ik = min(31, ik + h)
-        else:
-            ik = max(0, ik - h)
-        return pack(ip, ia, ik)
-
     def search(self):
-        Jb = self.cost(self.cid)
+        c4 = unpack(self.cid)
+        Jb = self.cost(*c4)
         best = self.cid
+        nd = 32 if self.h == 1 else 8
+        if self.cur >= nd:
+            self.cur = 0
         for _ in range(self.probes):
-            nid = self.neighbor(self.cid, self.cur, self.h)
+            n4 = neighbor(c4, self.cur, self.h)
+            nid = pack(*n4)
             if nid != self.cid:
-                J = self.cost(nid)
+                J = self.cost(*n4)
                 if J < Jb:
                     Jb, best = J, nid
-            self.cur = 0 if self.cur >= 5 else self.cur + 1
-        nid = pack((self.prp + 8) // 16, (self.pra + 8) // 16, (self.prk + 8) // 16)
+            self.cur = self.cur + 1 if self.cur + 1 < nd else 0
+        n4 = tuple((v + 1) // 2 for v in self.pr)
+        nid = pack(*n4)
         if nid != self.cid and nid != best:
-            J = self.cost(nid)
+            J = self.cost(*n4)
             if J < Jb:
                 Jb, best = J, nid
         if best != self.cid:
-            self.cid, self.lock = best, 0
-        elif self.h > 1:
-            self.h //= 2
+            self.cid, self.miss, self.lock = best, 0, 0
         else:
-            self.lock = 1
+            self.miss = min(64, self.miss + self.probes)
+            if self.h > 1:
+                self.h //= 2
+                self.miss = 0
+                if self.h == 1:
+                    self.cur = 0
+            elif self.miss >= nd:
+                self.lock = 1
         if self.lock:
             if abs(self.Sstar - self.lockS) > 410:
-                self.h, self.lock = 4, 0
+                self.h, self.miss, self.lock = H_RE, 0, 0
         else:
             self.lockS = self.Sstar
         return Jb
@@ -287,13 +320,11 @@ class Engine:
         self.Sstar = idiv(iP * self.gP + iT * self.gT + iF * self.gF, 4096)
         self.W2 = idiv(iP * W2P + iT * W2T + iF * W2F, 4096)
         self.W3 = idiv(W3_MAX * iF, 4096)
-        self.prp = idiv(iP * HP[0] + iT * HT[0] + iF * HF[0], 4096)
-        self.pra = idiv(iP * HP[1] + iT * HT[1] + iF * HF[1], 4096)
-        self.prk = idiv(iP * HP[2] + iT * HT[2] + iF * HF[2], 4096)
+        self.pr = [idiv(iP * HP[i] + iT * HT[i] + iF * HF[i], 4096) for i in range(4)]
         self.th = max(0, min(4096, t + idiv(vr * TAU * 64, self.span64)))
         # 5. live curve -> output
-        gk = self.g2k // 16
-        self.c.prep(self.g2p // 16, self.g2a // 16, gk, idiv(16777216, gk))
+        gp, gA, gK, gR = (v // 16 for v in self.g2)
+        self.c.prep(gp, gA, gK, idiv(16777216, gK), gR, idiv(16777216, gR))
         fcur = self.c.level(t)
         self.fcur = fcur
         self.Lhat = max(0, min(4096, fcur + idiv(self.Sstar * (self.th - t), 4096)))
@@ -317,17 +348,14 @@ class Engine:
             self.Fenv = self.lerp(self.Fenv, 0, FENV_REL)
         m = fast if fast > self.Fenv else self.Fenv
         gl = GL_SLOW - idiv((GL_SLOW - GL_FAST) * m, 4096)
-        ip, ia, ik = unpack(self.cid)
-        self.g1p = self.lerp(self.g1p, P_MAP[ip] * 16, gl)
-        self.g2p = self.lerp(self.g2p, self.g1p, gl)
-        self.g1a = self.lerp(self.g1a, A_MAP[ia] * 16, gl)
-        self.g2a = self.lerp(self.g2a, self.g1a, gl)
-        self.g1k = self.lerp(self.g1k, K_MAP[ik] * 16, gl)
-        self.g2k = self.lerp(self.g2k, self.g1k, gl)
+        maps = (P_MAP, A_MAP, K_MAP, R_MAP)
+        for i, idx in enumerate(unpack(self.cid)):
+            self.g1[i] = self.lerp(self.g1[i], maps[i][idx] * 16, gl)
+            self.g2[i] = self.lerp(self.g2[i], self.g1[i], gl)
         return out
 
     def live_params(self):
-        return self.g2p // 16, self.g2a // 16, self.g2k // 16
+        return tuple(v // 16 for v in self.g2)
 
 
 # ============================================================== display design
