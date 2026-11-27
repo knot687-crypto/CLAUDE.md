@@ -460,8 +460,7 @@ FONT3 = {
     'U': ['#.#', '#.#', '#.#', '#.#', '###'], 'V': ['#.#', '#.#', '#.#', '#.#', '.#.'],
     ' ': ['...', '...', '...', '...', '...'],
 }
-TAG_ON = 'ADAPTIVE CURVE ENGINE'
-TAG_OFF = 'CURVE ENGINE OFF'
+TAGLINE = 'ADAPTIVE CURVE ENGINE'
 
 
 def runs_of(row):
@@ -512,7 +511,21 @@ def text_tables(s):
     return rows, a, b
 
 
-def rest_frame(engine_on=True):
+def text_chunks(s):
+    """Run-index boundaries of the 10 tagline chunks: (row, left half) then (row, right half)."""
+    rows, a, b = text_tables(s)
+    out = []
+    for r in range(5):
+        out.append(rows[r])
+        k = rows[r]
+        while k < rows[r + 1] and a[k] < 64:
+            k += 1
+        out.append(k)
+    out.append(rows[5])
+    return out
+
+
+def rest_frame():
     """The designed idle screen, pixel for pixel."""
     fb = np.zeros((64, 128), dtype=np.uint8)
     for y in range(0, LH, 2):
@@ -527,7 +540,7 @@ def rest_frame(engine_on=True):
     fb[y - 2, x] = fb[y + 2, x] = 1
     fb[y - 1, x - 1:x + 2] = fb[y + 1, x - 1:x + 2] = 1
     fb[y, x - 2:x + 3] = 1
-    rows, a, b = text_tables(TAG_ON if engine_on else TAG_OFF)
+    rows, a, b = text_tables(TAGLINE)
     for r in range(5):
         for k in range(rows[r], rows[r + 1]):
             fb[TAG_Y + r, a[k]:b[k] + 1] = 1

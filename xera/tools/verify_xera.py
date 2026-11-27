@@ -11,7 +11,7 @@ Checks
   D  GPC output == bit-exact reference model (scenario + random fuzz incl. late ticks)
   E  compass search vs exhaustive search over the whole library
   F  feel metrics: tracking hysteresis, hold drift, flick lead/settle, ramp monotonicity
-  G  OLED: designed idle frame, every flash frame, ON/OFF tagline, button blocking
+  G  OLED: designed idle frame and every flash frame; the script touches only the aim stick
   H  cost per 1 ms tick (interpreter operations, OLED calls)
 """
 import os
@@ -28,7 +28,7 @@ import xera_model as M       # noqa: E402
 
 GPC_PATH = os.path.join(HERE, '..', 'XERA.gpc')
 C = G.DEVICE_CONSTS
-RX, RY, L2, SHARE = C['PS4_RX'], C['PS4_RY'], C['PS4_L2'], C['PS4_SHARE']
+RX, RY = C['PS4_RX'], C['PS4_RY']
 RESULTS = []
 
 
@@ -62,13 +62,12 @@ def check_tables():
     print('B. Embedded maps vs generated design')
     m = G.Machine(open(GPC_PATH).read())
     rows, x0, x1 = M.span_tables()
-    ton, toff = M.text_tables(M.TAG_ON), M.text_tables(M.TAG_OFF)
+    tag = M.text_tables(M.TAGLINE)
     want = {'XR_P_MAP': M.P_MAP, 'XR_A_MAP': M.A_MAP, 'XR_K_MAP': M.K_MAP, 'XR_IK_MAP': M.IK_MAP,
             'XR_SPAN_ROW': rows, 'XR_SPAN_X0': x0, 'XR_SPAN_X1': x1,
-            'XR_TON_ROW': ton[0], 'XR_TON_X0': ton[1], 'XR_TON_X1': ton[2],
-            'XR_TOFF_ROW': toff[0], 'XR_TOFF_X0': toff[1], 'XR_TOFF_X1': toff[2]}
+            'XR_TAG_CHUNK': M.text_chunks(M.TAGLINE), 'XR_TAG_X0': tag[1], 'XR_TAG_X1': tag[2]}
     bad = [k for k, v in want.items() if m.consts.get(k) != list(v)]
-    report('umaps', not bad, 'all 13 maps match' if not bad else f'mismatch: {bad}')
+    report('umaps', not bad, f'all {len(want)} maps match' if not bad else f'mismatch: {bad}')
     dv = {'XR_LX': M.LX, 'XR_LY': M.LY, 'XR_LW': M.LW, 'XR_LH': M.LH, 'XR_DIV_Y': M.DIV_Y,
           'XR_TAG_Y': M.TAG_Y, 'XR_DIA_X': M.DIA_X, 'XR_BW': M.BW, 'XR_TW': M.TW, 'XR_HX0': M.HX0,
           'XR_HX1': M.HX1, 'XR_SWEEP': M.SWEEP_MS, 'XR_STEP': M.STEP_MS, 'XR_CYCLE': M.CYCLE_MS,
@@ -279,42 +278,40 @@ def check_feel():
 
 # ------------------------------------------------------------------ G
 def check_oled():
-    print('G. OLED screen')
+    print('G. OLED screen and inputs')
     m = machine()
-    rest = M.rest_frame(True)
+    boot = 1 << m.defines['XR_B_BOOT']
+    rest = M.rest_frame()
     checked = bad = 0
     idle_ok = []
+    boot_ok = None
     for ms in range(1, M.BOOT_MS + 3 * M.CYCLE_MS):
         m.tick({}, 1)
         v = m.vars
-        if v['xr_flags'] & 8 and v['xr_rowc'] >= 11 and v['xr_at'] < M.SWEEP_MS + M.STEP_MS:
+        if boot_ok is None and v['xr_flags'] & boot:
+            boot_ok = (ms, np.array_equal(np.array(m.fb, dtype=np.uint8), rest))
+        if v['xr_flags'] & boot and v['xr_rowc'] >= 11 and v['xr_at'] < M.SWEEP_MS + M.STEP_MS:
             checked += 1
             fb = np.array(m.fb, dtype=np.uint8)[M.LY:M.LY + M.LH, M.LX:M.LX + M.LW]
             bad += not np.array_equal(fb, M.logo_with_flash(v['xr_hx']))
-        if v['xr_flags'] & 8 and v['xr_at'] == M.CYCLE_MS - 1:
+        if v['xr_flags'] & boot and v['xr_at'] == M.CYCLE_MS - 1:
             idle_ok.append(np.array_equal(np.array(m.fb, dtype=np.uint8), rest))
     report('flash frames', bad == 0 and checked > 0, f'{checked} frames drawn incrementally, {bad} differ from the design')
+    report('boot animation', bool(boot_ok and boot_ok[1]), f'scan-in completes at {boot_ok[0]} ms on the exact designed frame')
     report('idle screen', all(idle_ok) and idle_ok, f'pixel-exact designed frame at the end of {len(idle_ok)} cycles')
-
-    def tick(x=0, l2=0, sh=0):
-        return m.tick({RX: x, RY: 0, L2: l2, SHARE: sh}, 1)
-    tick(30)
-    tick(30, 100)
-    o = tick(30, 100, 1)
-    blocked = o[SHARE] == 0
-    off = m.vars['xr_flags'] & 1 == 0
-    for _ in range(M.CYCLE_MS + 100):
-        o = tick(30)
-    passthru = o[RX] == 30
-    tag_off = np.array_equal(np.array(m.fb, dtype=np.uint8)[M.TAG_Y:M.TAG_Y + 5], M.rest_frame(False)[M.TAG_Y:M.TAG_Y + 5])
-    tick(30, 100)
-    tick(30, 100, 1)
-    for _ in range(M.CYCLE_MS + 100):
-        o = tick(30)
-    tag_on = np.array_equal(np.array(m.fb, dtype=np.uint8)[M.TAG_Y:M.TAG_Y + 5], rest[M.TAG_Y:M.TAG_Y + 5])
-    alone = tick(0, 0, 1)[SHARE] == 1
-    report('ON/OFF toggle', blocked and off and passthru and tag_off and tag_on and alone and o[RX] != 30,
-           'L2+SHARE flips the engine, SHARE never reaches the game during the combo, OFF = raw stick, tagline swaps')
+    # every identifier other than the aim stick must pass through untouched, whatever is pressed
+    m = machine()
+    rnd = random.Random(5)
+    others = [k for k, v in C.items() if k.startswith('PS4_') and v not in (RX, RY)]
+    touched = set()
+    for k in range(4000):
+        inp = {C[n]: (rnd.randint(-100, 100) if n.endswith(('X', 'Y')) else rnd.choice((0, 0, 100)))
+               for n in others}
+        inp[RX], inp[RY] = rnd.randint(-100, 100), rnd.randint(-100, 100)
+        out = m.tick(inp, 1)
+        touched |= {n for n in others if out[C[n]] != inp[C[n]]}
+    report('touches only the aim stick', not touched,
+           'all buttons, triggers and the left stick pass through unchanged' if not touched else f'modified: {sorted(touched)}')
 
 
 # ------------------------------------------------------------------ H

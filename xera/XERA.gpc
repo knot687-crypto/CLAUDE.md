@@ -48,8 +48,9 @@
  *  BUILT FROM: bit-packed state (BVARS), unsigned lookup maps (UMAPS) and
  *  functions only. There are no combos.
  *
- *  CONTROLS
- *    Hold L2/LT and tap SHARE/VIEW  ->  XERA engine ON / OFF (tagline shows it)
+ *  ALWAYS ON
+ *    The engine runs the moment the script loads. It never reads or blocks a
+ *    button; the only thing it changes is your aim stick.
  *
  *  SETUP TIPS
  *    - Set the in-game response curve to LINEAR (or the flattest option) and
@@ -70,9 +71,6 @@ define XR_OUTER        = 100;        // stick % treated as full deflection (90 -
 define XR_GAIN_PREC    = 65;         // local gain while micro-aiming   (% of 1:1)
 define XR_GAIN_TRACK   = 100;        // local gain while tracking       (% of 1:1)
 define XR_GAIN_FLICK   = 190;        // local gain while flicking       (% of 1:1)
-define XR_TOGGLE_HOLD  = PS4_L2;     // hold this ...
-define XR_TOGGLE_TAP   = PS4_SHARE;  // ... and tap this to toggle the engine
-define XR_START_ON     = 1;          // 1 = engine ON when the script loads
 define XR_DITHER       = 0;          // 1 = stochastic rounding (sub-1% precision)
 define XR_PROBES       = 6;          // neighbour curves scored per ms (2 - 6)
 
@@ -114,10 +112,8 @@ define XR_HF_A      = 361;   //                 depth
 define XR_HF_K      = 388;   //                 drive
 
 // BVAR bit map (xr_flags)
-define XR_B_ON    = 0;       // engine enabled
-define XR_B_LOCK  = 1;       // search locked on the optimum
-define XR_B_TAG   = 2;       // tagline needs repaint
-define XR_B_BOOT  = 3;       // boot animation finished
+define XR_B_LOCK  = 0;       // search locked on the optimum
+define XR_B_BOOT  = 1;       // boot animation finished
 
 // ============================ DISPLAY CONSTANTS =============================
 define XR_LX      = 15;      // logo left
@@ -136,7 +132,7 @@ define XR_STEP    = 24;      // flash frame time (ms)
 define XR_CYCLE   = 3200;    // full animation cycle (ms)
 define XR_SPK_X   = 111;     // sparkle centre
 define XR_SPK_Y   = 7;
-define XR_ROWS_TK = 3;       // flash rows drawn per ms (keeps every tick light)
+define XR_ROWS_TK = 2;       // flash rows drawn per ms (keeps every tick light)
 
 // ============================ UMAPS (const lookup maps) =====================
 // curve lattice: knee position p, precision depth A = (1-a)/a, knee drive K, 1/K  (Q12)
@@ -174,9 +170,9 @@ const uint8 XR_SPAN_X1[]  = {
     54, 67, 81, 94, 6, 17, 42, 54, 67, 80, 95, 6, 17, 42, 54, 68, 80, 95, 5, 18, 42, 54, 69, 80,
     95, 4, 19, 42, 54, 69, 79, 96
 };
-// tagline "ADAPTIVE CURVE ENGINE" (3x5 micro font) as pixel runs per row
-const uint8 XR_TON_ROW[] = { 0, 22, 51, 77, 106, 130 };
-const uint8 XR_TON_X0[]  = {
+// tagline "ADAPTIVE CURVE ENGINE" (3x5 micro font) as pixel runs, in 10 half-row chunks
+const uint8 XR_TAG_CHUNK[] = { 0, 11, 22, 37, 51, 63, 77, 91, 106, 118, 130 };
+const uint8 XR_TAG_X0[]  = {
     23, 26, 31, 34, 38, 42, 46, 48, 50, 58, 62, 64, 66, 70, 72, 74, 82, 86, 90, 94, 98, 102, 22, 24,
     26, 28, 30, 32, 34, 36, 39, 43, 46, 48, 50, 58, 62, 64, 66, 68, 70, 72, 74, 82, 86, 88, 90, 95,
     98, 100, 102, 22, 26, 28, 30, 34, 39, 43, 46, 48, 50, 58, 62, 64, 66, 70, 72, 74, 82, 86, 88, 90,
@@ -184,7 +180,7 @@ const uint8 XR_TON_X0[]  = {
     74, 82, 86, 88, 90, 92, 95, 98, 100, 102, 22, 24, 26, 30, 32, 34, 39, 42, 47, 50, 58, 62, 66, 68,
     71, 74, 82, 86, 88, 90, 94, 98, 100, 102
 };
-const uint8 XR_TON_X1[]  = {
+const uint8 XR_TAG_X1[]  = {
     23, 27, 31, 35, 40, 44, 46, 48, 52, 60, 62, 64, 67, 70, 72, 76, 84, 87, 92, 96, 99, 104, 22, 24,
     26, 28, 30, 32, 34, 36, 39, 43, 46, 48, 50, 58, 62, 64, 66, 68, 70, 72, 74, 82, 86, 88, 90, 95,
     98, 100, 102, 24, 26, 28, 32, 35, 39, 43, 46, 48, 51, 58, 62, 64, 67, 70, 72, 75, 83, 86, 88, 90,
@@ -192,23 +188,9 @@ const uint8 XR_TON_X1[]  = {
     74, 82, 86, 88, 90, 92, 95, 98, 100, 102, 22, 24, 27, 30, 32, 34, 39, 44, 47, 52, 60, 64, 66, 68,
     71, 76, 84, 86, 88, 92, 96, 98, 100, 104
 };
-// tagline "CURVE ENGINE OFF"
-const uint8 XR_TOFF_ROW[] = { 0, 16, 36, 56, 77, 94 };
-const uint8 XR_TOFF_X0[]  = {
-    32, 36, 38, 40, 44, 46, 48, 56, 60, 64, 68, 72, 76, 84, 88, 92, 32, 36, 38, 40, 42, 44, 46, 48,
-    56, 60, 62, 64, 69, 72, 74, 76, 84, 86, 88, 92, 32, 36, 38, 40, 44, 46, 48, 56, 60, 62, 64, 66,
-    69, 72, 74, 76, 84, 86, 88, 92, 32, 36, 38, 40, 42, 44, 46, 48, 56, 60, 62, 64, 66, 69, 72, 74,
-    76, 84, 86, 88, 92, 32, 36, 40, 42, 45, 48, 56, 60, 62, 64, 68, 72, 74, 76, 84, 88, 92
-};
-const uint8 XR_TOFF_X1[]  = {
-    34, 36, 38, 41, 44, 46, 50, 58, 61, 66, 70, 73, 78, 86, 90, 94, 32, 36, 38, 40, 42, 44, 46, 48,
-    56, 60, 62, 64, 69, 72, 74, 76, 84, 86, 88, 92, 32, 36, 38, 41, 44, 46, 49, 57, 60, 62, 64, 66,
-    69, 72, 74, 77, 84, 86, 89, 93, 32, 36, 38, 40, 42, 44, 46, 48, 56, 60, 62, 64, 66, 69, 72, 74,
-    76, 84, 86, 88, 92, 34, 38, 40, 42, 45, 50, 58, 60, 62, 66, 70, 72, 74, 78, 86, 88, 92
-};
 
 // ============================ BVARS & STATE =================================
-int xr_flags;                                   // BVAR: engine / lock / tag / boot bits
+int xr_flags;                                   // BVAR: search-lock / boot-done bits
 int xr_cid;                                     // BVAR: curve id = p | a << 5 | K << 10
 int xr_dt, xr_x, xr_y, xr_r64, xr_t, xr_th;
 int xr_xe, xr_ye, xr_vx, xr_vy, xr_px, xr_res;
@@ -218,12 +200,12 @@ int xr_gP, xr_gT, xr_gF, xr_dz64, xr_span64, xr_adz;
 int xr_Ss, xr_W2, xr_W3, xr_prp, xr_pra, xr_prk, xr_Lhat, xr_fcur;
 int xr_O, xr_cden, xr_half, xr_num, xr_q, xr_a;
 int xr_h, xr_cur, xr_lockS, xr_probes, xr_okt, xr_late, xr_kk;
-int xr_best, xr_Jb, xr_J, xr_nid, xr_k;
+int xr_best, xr_Jb, xr_J, xr_nid, xr_k, xr_np, xr_na, xr_nk;
 int xr_ip, xr_ia, xr_ik, xr_ce, xr_cj;
-int xr_cp, xr_cA, xr_ciK, xr_cq, xr_den, xr_lu, xr_sg, xr_su, xr_su2;
+int xr_cp, xr_cA, xr_ciK, xr_cq, xr_kp, xr_den, xr_lu, xr_sg, xr_su, xr_su2;
 int xr_g1p, xr_g2p, xr_g1a, xr_g2a, xr_g1k, xr_g2k, xr_gl, xr_m;
 int xr_at, xr_hx, xr_hxp, xr_step, xr_rowc, xr_job, xr_tagj, xr_spk, xr_bead0;
-int xr_bt, xr_bj, xr_ds, xr_du, xr_dn;
+int xr_bt, xr_bj, xr_ds, xr_du, xr_dn, xr_dm;
 int xr_dk, xr_da, xr_db, xr_dl, xr_de, xr_dw0, xr_dw1;
 
 // ============================================================================
@@ -250,14 +232,11 @@ init {
     xr_step   = -1;
     xr_rowc   = 11;
     xr_job    = 99;
-    xr_tagj   = 5;
+    xr_tagj   = 10;
     xr_spk    = -1;
     xr_bead0  = -1;
     xr_hx     = XR_HX0;
     xr_hxp    = XR_HX0;
-    if (XR_START_ON) {
-        set_bit(xr_flags, XR_B_ON);
-    }
     cls_oled(0);
 }
 
@@ -271,24 +250,11 @@ main {
     if (xr_dt > 20) {
         xr_dt = 20;
     }
-    xr_toggle();
-    if (test_bit(xr_flags, XR_B_ON)) {
-        xr_engine();
-    }
+    xr_engine();
     xr_display();
 }
 
 // ============================ MATH ==========================================
-function xr_clamp(v, lo, hi) {
-    if (v < lo) {
-        return lo;
-    }
-    if (v > hi) {
-        return hi;
-    }
-    return v;
-}
-
 // one exponential-smoothing step toward g with time constant r ms (frame-rate independent)
 function xr_lerp(c, g, r) {
     xr_kk = xr_dt;
@@ -311,109 +277,117 @@ function xr_ss(e0, e1, v) {
     return (xr_su2 * (12288 - (2 * xr_su))) / 4096;
 }
 
-// load a curve: knee p, depth A, drive K, 1/K  ->  knee height q = K p / (A(1-p) + K p)
-function xr_prep(p, a, k, ik) {
-    xr_cp  = p;
-    xr_cA  = a;
-    xr_ciK = ik;
-    xr_cq  = (k * p) / (((a * (4096 - p)) + (k * p)) / 4096);
-    return 0;
+// ============================ CURVE LIBRARY =================================
+// Dual-rational S-curve in Q12 for knee p, depth A, drive K (1/K) and knee height
+// q = K p / (A (1-p) + K p):
+//   t <  p:  u = t/p          den = (A-1)(1-u) + 1     f = q u / den
+//                                                      f' = (q/p) A / den^2
+//   t >= p:  w = (t-p)/(1-p)  den = (1/K-1)(1-w) + 1   f = q + (1-q) w / den
+//                                                      f' = ((1-q)/(1-p)) (1/K) / den^2
+
+// level of the live (glided) curve at the stick
+function xr_live() {
+    xr_cp  = xr_g2p / 16;
+    xr_cA  = xr_g2a / 16;
+    xr_a   = xr_g2k / 16;
+    xr_ciK = 16777216 / xr_a;
+    xr_kp  = xr_a * xr_cp;
+    xr_cq  = xr_kp / (((xr_cA * (4096 - xr_cp)) + xr_kp) / 4096);
+    if (xr_t < xr_cp) {
+        xr_lu = (xr_t * 4096) / xr_cp;
+        return (xr_cq * xr_lu) / ((((xr_cA - 4096) * (4096 - xr_lu)) / 4096) + 4096);
+    }
+    xr_lu = ((xr_t - xr_cp) * 4096) / (4096 - xr_cp);
+    return xr_cq + (((4096 - xr_cq) * xr_lu) / ((((xr_ciK - 4096) * (4096 - xr_lu)) / 4096) + 4096));
 }
 
-// curve level f(t), Q12 in / Q12 out
-function xr_level(t) {
-    if (t < xr_cp) {
-        xr_lu  = (t * 4096) / xr_cp;
+// score library curve (ip, ia, ik) for the current stick moment (lower = better)
+function xr_cost(ip, ia, ik) {
+    xr_cp  = XR_P_MAP[ip];
+    xr_cA  = XR_A_MAP[ia];
+    xr_ciK = XR_IK_MAP[ik];
+    xr_kp  = XR_K_MAP[ik] * xr_cp;
+    xr_cq  = xr_kp / (((xr_cA * (4096 - xr_cp)) + xr_kp) / 4096);
+    // gain error at the stick
+    if (xr_t < xr_cp) {
+        xr_lu  = (xr_t * 4096) / xr_cp;
         xr_den = (((xr_cA - 4096) * (4096 - xr_lu)) / 4096) + 4096;
-        return (xr_cq * xr_lu) / xr_den;
-    }
-    xr_lu  = ((t - xr_cp) * 4096) / (4096 - xr_cp);
-    xr_den = (((xr_ciK - 4096) * (4096 - xr_lu)) / 4096) + 4096;
-    return xr_cq + (((4096 - xr_cq) * xr_lu) / xr_den);
-}
-
-// curve gain f'(t), exact derivative; call right after xr_level(t)
-function xr_slope(t) {
-    if (t < xr_cp) {
-        xr_sg = (xr_cq * 4096) / xr_cp;
-        xr_sg = (xr_sg * xr_cA) / xr_den;
+        xr_sg  = (((xr_cq * 4096) / xr_cp) * xr_cA) / xr_den;
     } else {
-        xr_sg = ((4096 - xr_cq) * 4096) / (4096 - xr_cp);
-        xr_sg = (xr_sg * xr_ciK) / xr_den;
+        xr_lu  = ((xr_t - xr_cp) * 4096) / (4096 - xr_cp);
+        xr_den = (((xr_ciK - 4096) * (4096 - xr_lu)) / 4096) + 4096;
+        xr_sg  = ((((4096 - xr_cq) * 4096) / (4096 - xr_cp)) * xr_ciK) / xr_den;
     }
-    return (xr_sg * 4096) / xr_den;
+    xr_ce = (((xr_sg * 4096) / xr_den) - xr_Ss) / 16;
+    xr_cj = xr_W2 * xr_ce * xr_ce;
+    // predicted-path error 24 ms ahead (only while flicking)
+    if (xr_W3 > 0) {
+        if (xr_th < xr_cp) {
+            xr_lu = (xr_th * 4096) / xr_cp;
+            xr_ce = (xr_cq * xr_lu) / ((((xr_cA - 4096) * (4096 - xr_lu)) / 4096) + 4096);
+        } else {
+            xr_lu = ((xr_th - xr_cp) * 4096) / (4096 - xr_cp);
+            xr_ce = xr_cq + (((4096 - xr_cq) * xr_lu) / ((((xr_ciK - 4096) * (4096 - xr_lu)) / 4096) + 4096));
+        }
+        xr_ce = (xr_ce - xr_Lhat) / 16;
+        xr_cj = xr_cj + (xr_W3 * xr_ce * xr_ce);
+    }
+    // distance from the intent's home shape
+    xr_ce = (ip * 16) - xr_prp;
+    xr_cj = xr_cj + (XR_W4 * xr_ce * xr_ce);
+    xr_ce = (ia * 16) - xr_pra;
+    xr_cj = xr_cj + (XR_W4 * xr_ce * xr_ce);
+    xr_ce = (ik * 16) - xr_prk;
+    return xr_cj + (XR_W4 * xr_ce * xr_ce);
 }
 
 // ============================ CURVE SEARCH ==================================
-// score one curve of the library for the current stick moment (lower = better)
-function xr_cost(cid) {
-    xr_ip = cid & 31;
-    xr_ia = (cid >> 5) & 31;
-    xr_ik = (cid >> 10) & 31;
-    xr_prep(XR_P_MAP[xr_ip], XR_A_MAP[xr_ia], XR_K_MAP[xr_ik], XR_IK_MAP[xr_ik]);
-    xr_level(xr_t);
-    xr_ce = (xr_slope(xr_t) - xr_Ss) / 16;               // gain error at the stick
-    xr_cj = xr_W2 * xr_ce * xr_ce;
-    if (xr_W3 > 0) {
-        xr_ce = (xr_level(xr_th) - xr_Lhat) / 16;         // predicted-path error
-        xr_cj = xr_cj + (xr_W3 * xr_ce * xr_ce);
-    }
-    xr_ce = (xr_ip * 16) - xr_prp;                        // home-shape distance
-    xr_cj = xr_cj + (XR_W4 * xr_ce * xr_ce);
-    xr_ce = (xr_ia * 16) - xr_pra;
-    xr_cj = xr_cj + (XR_W4 * xr_ce * xr_ce);
-    xr_ce = (xr_ik * 16) - xr_prk;
-    xr_cj = xr_cj + (XR_W4 * xr_ce * xr_ce);
-    return xr_cj;
-}
-
-// neighbour of a curve id: direction d (0..5 = +p -p +a -a +K -K), step h
-function xr_nb(cid, d, h) {
-    xr_ip = cid & 31;
-    xr_ia = (cid >> 5) & 31;
-    xr_ik = (cid >> 10) & 31;
-    if (d == 0) {
-        xr_ip = xr_ip + h;
-        if (xr_ip > 31) {
-            xr_ip = 31;
-        }
-    } else if (d == 1) {
-        xr_ip = xr_ip - h;
-        if (xr_ip < 0) {
-            xr_ip = 0;
-        }
-    } else if (d == 2) {
-        xr_ia = xr_ia + h;
-        if (xr_ia > 31) {
-            xr_ia = 31;
-        }
-    } else if (d == 3) {
-        xr_ia = xr_ia - h;
-        if (xr_ia < 0) {
-            xr_ia = 0;
-        }
-    } else if (d == 4) {
-        xr_ik = xr_ik + h;
-        if (xr_ik > 31) {
-            xr_ik = 31;
-        }
-    } else {
-        xr_ik = xr_ik - h;
-        if (xr_ik < 0) {
-            xr_ik = 0;
-        }
-    }
-    return xr_ip | (xr_ia << 5) | (xr_ik << 10);
-}
-
 // one compass-search pass over the 32,768-curve library
 function xr_search() {
-    xr_Jb   = xr_cost(xr_cid);
+    xr_ip   = xr_cid & 31;
+    xr_ia   = (xr_cid >> 5) & 31;
+    xr_ik   = (xr_cid >> 10) & 31;
+    xr_Jb   = xr_cost(xr_ip, xr_ia, xr_ik);
     xr_best = xr_cid;
     for (xr_k = 0; xr_k < xr_probes; xr_k++) {
-        xr_nid = xr_nb(xr_cid, xr_cur, xr_h);
+        // neighbour along direction xr_cur (+p -p +a -a +K -K) at step xr_h
+        xr_np = xr_ip;
+        xr_na = xr_ia;
+        xr_nk = xr_ik;
+        if (xr_cur == 0) {
+            xr_np = xr_np + xr_h;
+            if (xr_np > 31) {
+                xr_np = 31;
+            }
+        } else if (xr_cur == 1) {
+            xr_np = xr_np - xr_h;
+            if (xr_np < 0) {
+                xr_np = 0;
+            }
+        } else if (xr_cur == 2) {
+            xr_na = xr_na + xr_h;
+            if (xr_na > 31) {
+                xr_na = 31;
+            }
+        } else if (xr_cur == 3) {
+            xr_na = xr_na - xr_h;
+            if (xr_na < 0) {
+                xr_na = 0;
+            }
+        } else if (xr_cur == 4) {
+            xr_nk = xr_nk + xr_h;
+            if (xr_nk > 31) {
+                xr_nk = 31;
+            }
+        } else {
+            xr_nk = xr_nk - xr_h;
+            if (xr_nk < 0) {
+                xr_nk = 0;
+            }
+        }
+        xr_nid = xr_np | (xr_na << 5) | (xr_nk << 10);
         if (xr_nid != xr_cid) {
-            xr_J = xr_cost(xr_nid);
+            xr_J = xr_cost(xr_np, xr_na, xr_nk);
             if (xr_J < xr_Jb) {
                 xr_Jb   = xr_J;
                 xr_best = xr_nid;
@@ -425,10 +399,13 @@ function xr_search() {
         }
     }
     // also score the intent's home curve: lets the search jump straight to a new regime
-    xr_nid = ((xr_prp + 8) / 16) | (((xr_pra + 8) / 16) << 5) | (((xr_prk + 8) / 16) << 10);
+    xr_np  = (xr_prp + 8) / 16;
+    xr_na  = (xr_pra + 8) / 16;
+    xr_nk  = (xr_prk + 8) / 16;
+    xr_nid = xr_np | (xr_na << 5) | (xr_nk << 10);
     if (xr_nid != xr_cid) {
         if (xr_nid != xr_best) {
-            xr_J = xr_cost(xr_nid);
+            xr_J = xr_cost(xr_np, xr_na, xr_nk);
             if (xr_J < xr_Jb) {
                 xr_Jb   = xr_J;
                 xr_best = xr_nid;
@@ -465,13 +442,17 @@ function xr_glide() {
     if (xr_fast > xr_m) {
         xr_m = xr_fast;
     }
-    xr_gl  = XR_GL_SLOW - (((XR_GL_SLOW - XR_GL_FAST) * xr_m) / 4096);
-    xr_g1p = xr_lerp(xr_g1p, XR_P_MAP[xr_cid & 31] * 16, xr_gl);
-    xr_g2p = xr_lerp(xr_g2p, xr_g1p, xr_gl);
-    xr_g1a = xr_lerp(xr_g1a, XR_A_MAP[(xr_cid >> 5) & 31] * 16, xr_gl);
-    xr_g2a = xr_lerp(xr_g2a, xr_g1a, xr_gl);
-    xr_g1k = xr_lerp(xr_g1k, XR_K_MAP[(xr_cid >> 10) & 31] * 16, xr_gl);
-    xr_g2k = xr_lerp(xr_g2k, xr_g1k, xr_gl);
+    xr_gl = XR_GL_SLOW - (((XR_GL_SLOW - XR_GL_FAST) * xr_m) / 4096);
+    xr_kk = xr_dt;
+    if (xr_kk > xr_gl) {
+        xr_kk = xr_gl;
+    }
+    xr_g1p = xr_g1p + ((((XR_P_MAP[xr_cid & 31] * 16) - xr_g1p) * xr_kk) / xr_gl);
+    xr_g2p = xr_g2p + (((xr_g1p - xr_g2p) * xr_kk) / xr_gl);
+    xr_g1a = xr_g1a + ((((XR_A_MAP[(xr_cid >> 5) & 31] * 16) - xr_g1a) * xr_kk) / xr_gl);
+    xr_g2a = xr_g2a + (((xr_g1a - xr_g2a) * xr_kk) / xr_gl);
+    xr_g1k = xr_g1k + ((((XR_K_MAP[(xr_cid >> 10) & 31] * 16) - xr_g1k) * xr_kk) / xr_gl);
+    xr_g2k = xr_g2k + (((xr_g1k - xr_g2k) * xr_kk) / xr_gl);
     return 0;
 }
 
@@ -536,11 +517,21 @@ function xr_engine() {
     xr_px  = xr_xe + ((xr_vx * xr_dt) / 16);
     xr_res = (xr_x * 256) - xr_px;
     xr_xe  = xr_px + ((xr_res * XR_ALPHA) / 4096);
-    xr_vx  = xr_clamp(xr_vx + ((xr_res * 16 * XR_BETA) / (4096 * xr_dt)), -16384, 16384);
+    xr_vx  = xr_vx + ((xr_res * 16 * XR_BETA) / (4096 * xr_dt));
+    if (xr_vx > 16384) {
+        xr_vx = 16384;
+    } else if (xr_vx < -16384) {
+        xr_vx = -16384;
+    }
     xr_px  = xr_ye + ((xr_vy * xr_dt) / 16);
     xr_res = (xr_y * 256) - xr_px;
     xr_ye  = xr_px + ((xr_res * XR_ALPHA) / 4096);
-    xr_vy  = xr_clamp(xr_vy + ((xr_res * 16 * XR_BETA) / (4096 * xr_dt)), -16384, 16384);
+    xr_vy  = xr_vy + ((xr_res * 16 * XR_BETA) / (4096 * xr_dt));
+    if (xr_vy > 16384) {
+        xr_vy = 16384;
+    } else if (xr_vy < -16384) {
+        xr_vy = -16384;
+    }
     xr_S   = isqrt((xr_vx * xr_vx) + (xr_vy * xr_vy));
     xr_Sm  = xr_lerp(xr_Sm, xr_S, XR_SM_RATE);
     xr_vr  = 0;
@@ -573,12 +564,20 @@ function xr_engine() {
     xr_prp = ((xr_iP * XR_HP_P) + (xr_iT * XR_HT_P) + (xr_iF * XR_HF_P)) / 4096;
     xr_pra = ((xr_iP * XR_HP_A) + (xr_iT * XR_HT_A) + (xr_iF * XR_HF_A)) / 4096;
     xr_prk = ((xr_iP * XR_HP_K) + (xr_iT * XR_HT_K) + (xr_iF * XR_HF_K)) / 4096;
-    xr_th  = xr_clamp(xr_t + ((xr_vr * XR_TAU * 64) / xr_span64), 0, 4096);
+    xr_th  = xr_t + ((xr_vr * XR_TAU * 64) / xr_span64);
+    if (xr_th < 0) {
+        xr_th = 0;
+    } else if (xr_th > 4096) {
+        xr_th = 4096;
+    }
     // ---- 5. live curve -> stick output
-    xr_a    = xr_g2k / 16;
-    xr_prep(xr_g2p / 16, xr_g2a / 16, xr_a, 16777216 / xr_a);
-    xr_fcur = xr_level(xr_t);
-    xr_Lhat = xr_clamp(xr_fcur + ((xr_Ss * (xr_th - xr_t)) / 4096), 0, 4096);
+    xr_fcur = xr_live();
+    xr_Lhat = xr_fcur + ((xr_Ss * (xr_th - xr_t)) / 4096);
+    if (xr_Lhat < 0) {
+        xr_Lhat = 0;
+    } else if (xr_Lhat > 4096) {
+        xr_Lhat = 4096;
+    }
     if (xr_t > 0) {
         xr_O = xr_fcur;
         if (xr_adz > 0) {
@@ -595,26 +594,6 @@ function xr_engine() {
     // ---- 6. search the library for the next millisecond, then glide
     xr_search();
     xr_glide();
-    return 0;
-}
-
-// hold L2/LT + tap SHARE/VIEW: engine on/off (the tap never reaches the game)
-function xr_toggle() {
-    if (get_ival(XR_TOGGLE_HOLD) > 50) {
-        if (event_press(XR_TOGGLE_TAP)) {
-            if (test_bit(xr_flags, XR_B_ON)) {
-                clear_bit(xr_flags, XR_B_ON);
-            } else {
-                set_bit(xr_flags, XR_B_ON);
-                xr_xe = get_ival(XR_AIM_X) * 256;
-                xr_ye = get_ival(XR_AIM_Y) * 256;
-                xr_vx = 0;
-                xr_vy = 0;
-            }
-            set_bit(xr_flags, XR_B_TAG);
-        }
-        set_val(XR_TOGGLE_TAP, 0);
-    }
     return 0;
 }
 
@@ -709,21 +688,15 @@ function xr_brackets() {
     return 0;
 }
 
-// tagline row r (0..4): ADAPTIVE CURVE ENGINE / CURVE ENGINE OFF
-function xr_tag_row(r) {
-    line_oled(16, XR_TAG_Y + r, 111, XR_TAG_Y + r, 1, 0);
-    if (test_bit(xr_flags, XR_B_ON)) {
-        xr_dk = XR_TON_ROW[r];
-        while (xr_dk < XR_TON_ROW[r + 1]) {
-            line_oled(XR_TON_X0[xr_dk], XR_TAG_Y + r, XR_TON_X1[xr_dk], XR_TAG_Y + r, 1, 1);
-            xr_dk = xr_dk + 1;
-        }
-    } else {
-        xr_dk = XR_TOFF_ROW[r];
-        while (xr_dk < XR_TOFF_ROW[r + 1]) {
-            line_oled(XR_TOFF_X0[xr_dk], XR_TAG_Y + r, XR_TOFF_X1[xr_dk], XR_TAG_Y + r, 1, 1);
-            xr_dk = xr_dk + 1;
-        }
+// tagline chunk c (0..9) = left or right half of row c / 2: ADAPTIVE CURVE ENGINE
+function xr_tag_part(c) {
+    if ((c % 2) == 0) {
+        line_oled(16, XR_TAG_Y + (c / 2), 111, XR_TAG_Y + (c / 2), 1, 0);
+    }
+    xr_dk = XR_TAG_CHUNK[c];
+    while (xr_dk < XR_TAG_CHUNK[c + 1]) {
+        line_oled(XR_TAG_X0[xr_dk], XR_TAG_Y + (c / 2), XR_TAG_X1[xr_dk], XR_TAG_Y + (c / 2), 1, 1);
+        xr_dk = xr_dk + 1;
     }
     return 0;
 }
@@ -785,9 +758,9 @@ function xr_boot_tick() {
         }
         return 0;
     }
-    if (xr_bj < (XR_LH + 7)) {
-        if (xr_bt >= (400 + ((xr_bj - XR_LH - 2) * 24))) {
-            xr_tag_row(xr_bj - XR_LH - 2);
+    if (xr_bj < (XR_LH + 12)) {
+        if (xr_bt >= (400 + ((xr_bj - XR_LH - 2) * 12))) {
+            xr_tag_part(xr_bj - XR_LH - 2);
             xr_bj = xr_bj + 1;
         }
         return 0;
@@ -838,7 +811,11 @@ function xr_display() {
         }
     }
     xr_dn = 0;
-    while ((xr_rowc < 11) && (xr_dn < XR_ROWS_TK)) {
+    xr_dm = XR_ROWS_TK;
+    if (xr_W3 > 0) {
+        xr_dm = 1;                                    // flicking: keep this tick light
+    }
+    while ((xr_rowc < 11) && (xr_dn < xr_dm)) {
         xr_sweep_row(1 + (2 * xr_rowc));
         xr_rowc = xr_rowc + 1;
         xr_dn   = xr_dn + 1;
@@ -863,13 +840,13 @@ function xr_display() {
             return 0;
         }
     }
-    // tagline refresh after an ON/OFF toggle, then a slow self-healing repaint
-    if (test_bit(xr_flags, XR_B_TAG)) {
-        clear_bit(xr_flags, XR_B_TAG);
-        xr_tagj = 0;
+    // slow self-healing repaint of the whole screen, one piece per tick,
+    // held back while you flick so it never competes with the curve search
+    if (xr_W3 > 0) {
+        return 0;
     }
-    if (xr_tagj < 5) {
-        xr_tag_row(xr_tagj);
+    if (xr_tagj < 10) {
+        xr_tag_part(xr_tagj);
         xr_tagj = xr_tagj + 1;
         return 0;
     }

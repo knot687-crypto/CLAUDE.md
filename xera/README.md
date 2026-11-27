@@ -17,7 +17,7 @@ and the search starts again on the next millisecond.
 
 1. Open `XERA.gpc` in Zen Studio, compile (32-bit, which is the default), and program it to a slot.
 2. In game, set the stick response curve to **Linear** (or the flattest option) and the **deadzone as low as it goes**. XERA provides both.
-3. **Hold L2/LT and tap SHARE/VIEW** to turn the engine on or off. The tagline changes to `CURVE ENGINE OFF`, and the stick passes through untouched. The SHARE tap never reaches the game.
+3. That's it. XERA is **always on** from the moment the slot loads. It has no toggle, reads no buttons, and changes nothing except your aim stick.
 
 | Setting | Default | What it does |
 |---|---|---|
@@ -27,7 +27,7 @@ and the search starts again on the next millisecond.
 | `XR_GAIN_PREC` / `TRACK` / `FLICK` | 65 / 100 / 190 | Local gain (% of 1:1) the curve aims for while micro-aiming, tracking and flicking. |
 | `XR_DITHER` | 0 | Set to 1 for stochastic rounding, which averages finer than 1% output steps. |
 | `XR_PROBES` | 6 | Neighbour curves scored per ms. Lower it if Zen Studio shows a high CPU load. |
-| `XR_AIM_X/Y`, `XR_TOGGLE_*` | RX/RY, L2 + SHARE | Stick and toggle buttons. |
+| `XR_AIM_X/Y` | RX / RY | The stick XERA drives (the right stick on both PlayStation and Xbox). |
 
 ## How it works
 
@@ -67,7 +67,7 @@ I couldn't compile the script in Zen Studio here; that is the one step still to 
 script against a bit-exact reference model ([`tools/xera_model.py`](tools/xera_model.py)).
 
 ```
-python3 tools/verify_xera.py            # 20 checks, about 1 minute
+python3 tools/verify_xera.py            # 21 checks, about 1 minute
 python3 tools/verify_xera.py --preview  # also re-renders the GIF and PNG
 ```
 
@@ -81,13 +81,14 @@ python3 tools/verify_xera.py --preview  # also re-renders the GIF and PNG
 | Holding still | the curve moves 0.00% during a steady hold |
 | Flicks | 8.3% average output lead during the flick (18% at peak); output settles within 2% about 26 ms after the stick stops |
 | Ramps | pushing the stick further never lowers the output by more than 0.1% (less than one output unit) |
-| OLED | 2,583 flash frames and the idle screen are pixel-exact against the design; the ON/OFF tagline swaps correctly |
-| Cost | about 3,100 interpreter operations per tick on average; at most 30 OLED calls in a single tick |
+| OLED | the boot scan-in, 2,337 flash frames and the idle screen are pixel-exact against the design |
+| Inputs | every button, trigger and the left stick pass through unchanged; only the aim stick is modified |
+| Cost | about 2,540 interpreter operations per tick on average and 3,624 at worst; at most 16 OLED calls in a single tick |
 
 Two things still need checking on real hardware:
 
 - **Zen Studio compile.** If it reports anything, send me the message and I'll fix it.
-- **CPU load at 1 ms.** If the load is high, lower `XR_PROBES` to 4 or 3. The built-in governor also steps down automatically when ticks keep running late. Every filter is frame-rate independent, so the feel stays the same at a 2 ms tick.
+- **CPU load at 1 ms.** The per-tick work has been trimmed: the curve-scoring path is inlined, and while you flick the screen draws less and postpones its background repaint, so the search always has the tick to itself. If the load is still high, lower `XR_PROBES` to 4 or 3. The built-in governor also steps down automatically when ticks keep running late. Every filter is frame-rate independent, so the feel stays the same at a 2 ms tick.
 
 ## Files
 
