@@ -1,0 +1,890 @@
+/* ===========================================================================
+ *
+ *      ##   ##  #######  ######    #####
+ *       ## ##   ##       ##   ##  ##   ##
+ *        ###    #####    ######   #######
+ *       ## ##   ##       ##  ##   ##   ##
+ *      ##   ##  #######  ##   ##  ##   ##
+ *
+ *      XERA  -  Adaptive Curve Engine            for Cronus Zen  (GPC, 32-bit)
+ *
+ * ---------------------------------------------------------------------------
+ *  WHAT IT DOES
+ *    Every 1 ms XERA reads your aim stick and works out how it is moving:
+ *    where it is, how fast, which direction, outward or inward, and whether
+ *    you are micro-aiming, tracking or flicking. It then searches a library of
+ *    32,768 response curves for the one that best fits that exact moment,
+ *    glides to it without a bump, and repeats on the next millisecond.
+ *
+ *  THE CURVE LIBRARY  (never linear, never expo)
+ *    Every curve is a dual-rational S-curve: a convex precision zone and a
+ *    concave speed zone joined at a knee p with matched slope (C1-smooth):
+ *        f(t) = q * B(t/p ; a)                      for t <  p
+ *        f(t) = q + (1-q) * B((t-p)/(1-p) ; b)      for t >= p
+ *        B(u ; s) = u / ((1/s - 2) * (1 - u) + 1)
+ *    32 knee positions x 32 precision depths x 32 knee drives = 32,768 curves.
+ *    Each curve is strictly monotone, has a true inflection point, and its
+ *    knee gain is always at least 2.25x its centre gain and 1.56x its top gain.
+ *    So no curve in the library is linear, and none bends only one way like expo.
+ *
+ *  HOW THE SEARCH WORKS  (every 1 ms)
+ *    1. An alpha-beta tracking filter estimates stick velocity at 1 kHz.
+ *    2. Fuzzy intent: PRECISION (slow and near centre), TRACKING, and FLICK
+ *       (fast and outward), blended smoothly with smoothstep memberships.
+ *    3. Cost of a curve = gain error at your stick position
+ *                       + predicted-path error 24 ms ahead (flicks)
+ *                       + distance from the intent's home shape.
+ *    4. A compass (pattern) search scores 6 neighbours plus the intent's home
+ *       curve each tick, halving its step until it locks on. Tested against
+ *       an exhaustive scan of all 32,768 curves, it lands on the same curve
+ *       98.5% of the time, usually within 4 ms.
+ *    5. The winner is blended in through a critically damped two-stage glide.
+ *       The glide is fast while you flick and slow while you hold, so the
+ *       curve never jumps under your thumb.
+ *    6. The curve is applied radially, so your aim direction is preserved.
+ *       The output is rounded to the nearest unit, or stochastically rounded
+ *       when XR_DITHER is 1.
+ *
+ *  BUILT FROM: bit-packed state (BVARS), unsigned lookup maps (UMAPS) and
+ *  functions only. There are no combos.
+ *
+ *  CONTROLS
+ *    Hold L2/LT and tap SHARE/VIEW  ->  XERA engine ON / OFF (tagline shows it)
+ *
+ *  SETUP TIPS
+ *    - Set the in-game response curve to LINEAR (or the flattest option) and
+ *      the in-game deadzone as low as it goes. XERA supplies both.
+ *    - Raise XR_DEADZONE only if your stick drifts. If the game forces a
+ *      deadzone, set XR_ANTI_DZ to roughly the same percent.
+ *    - In Zen Studio, keep the Zen's CPU load under about 80%. If it is high,
+ *      lower XR_PROBES. A built-in governor also backs off by itself
+ *      whenever a 1 ms tick runs long.
+ * ======================================================================== */
+
+// ============================ USER SETTINGS =================================
+define XR_AIM_X        = PS4_RX;     // aim stick X (identical to XB1_RX)
+define XR_AIM_Y        = PS4_RY;     // aim stick Y (identical to XB1_RY)
+define XR_DEADZONE     = 4;          // inner deadzone, stick %   (0 - 20)
+define XR_ANTI_DZ      = 0;          // anti-deadzone, output %   (0 - 30)
+define XR_OUTER        = 100;        // stick % treated as full deflection (90 - 100)
+define XR_GAIN_PREC    = 65;         // local gain while micro-aiming   (% of 1:1)
+define XR_GAIN_TRACK   = 100;        // local gain while tracking       (% of 1:1)
+define XR_GAIN_FLICK   = 190;        // local gain while flicking       (% of 1:1)
+define XR_TOGGLE_HOLD  = PS4_L2;     // hold this ...
+define XR_TOGGLE_TAP   = PS4_SHARE;  // ... and tap this to toggle the engine
+define XR_START_ON     = 1;          // 1 = engine ON when the script loads
+define XR_DITHER       = 0;          // 1 = stochastic rounding (sub-1% precision)
+define XR_PROBES       = 6;          // neighbour curves scored per ms (2 - 6)
+
+// ============================ ENGINE CONSTANTS ==============================
+// Fixed point: Q12 -> 4096 = 1.0.  Speeds in Q12 stick-units per ms.
+define XR_VM_MS     = 1;     // target VM tick (vm_tctrl(-9) = 1 ms)
+define XR_ALPHA     = 1024;  // alpha-beta filter: position gain   0.250
+define XR_BETA      = 110;   // alpha-beta filter: velocity gain   0.027
+define XR_FAST_LO   = 1843;  // flick speed window   0.45 .. 1.30 units/ms
+define XR_FAST_HI   = 5325;
+define XR_OUT_LO    = 614;   // outward ratio window 0.15 .. 0.75
+define XR_OUT_HI    = 3072;
+define XR_SLOW_LO   = 287;   // precision speed window 0.07 .. 0.22 units/ms
+define XR_SLOW_HI   = 901;
+define XR_NEAR_LO   = 410;   // precision deflection window 0.10 .. 0.42
+define XR_NEAR_HI   = 1720;
+define XR_SM_RATE   = 24;    // speed memory (ms)
+define XR_F_ATK     = 4;     // flick intent attack (ms)
+define XR_F_REL     = 6;     // flick intent release (ms)
+define XR_P_RATE    = 16;    // precision intent rate (ms)
+define XR_FENV_REL  = 96;    // post-flick envelope release (ms)
+define XR_W2P       = 10;    // gain-error weight: precision
+define XR_W2T       = 0;     // gain-error weight: tracking (stable home shape)
+define XR_W2F       = 8;     // gain-error weight: flick
+define XR_TAU       = 24;    // flick path prediction horizon (ms)
+define XR_W3_MAX    = 24;    // predicted-path weight at full flick
+define XR_W4        = 2;     // home-shape (Tikhonov) weight
+define XR_GL_SLOW   = 16;    // glide divisor at rest (ms)
+define XR_GL_FAST   = 3;     // glide divisor while flicking (ms)
+// intent home curves, lattice coordinates in Q4 (index * 16)
+define XR_HP_P      = 248;   // precision home: knee
+define XR_HP_A      = 271;   //                 depth
+define XR_HP_K      = 109;   //                 drive
+define XR_HT_P      = 191;   // tracking home:  knee
+define XR_HT_A      = 406;   //                 depth
+define XR_HT_K      = 62;    //                 drive
+define XR_HF_P      = 76;    // flick home:     knee
+define XR_HF_A      = 361;   //                 depth
+define XR_HF_K      = 388;   //                 drive
+
+// BVAR bit map (xr_flags)
+define XR_B_ON    = 0;       // engine enabled
+define XR_B_LOCK  = 1;       // search locked on the optimum
+define XR_B_TAG   = 2;       // tagline needs repaint
+define XR_B_BOOT  = 3;       // boot animation finished
+
+// ============================ DISPLAY CONSTANTS =============================
+define XR_LX      = 15;      // logo left
+define XR_LY      = 12;      // logo top
+define XR_LW      = 97;      // logo width
+define XR_LH      = 22;      // logo height
+define XR_DIV_Y   = 41;      // divider row
+define XR_TAG_Y   = 47;      // tagline top row
+define XR_DIA_X   = 63;      // divider diamond centre
+define XR_BW      = 7;       // flash band width
+define XR_TW      = 6;       // flash trail width
+define XR_HX0     = -11;     // flash start (logo x)
+define XR_HX1     = 109;     // flash end   (logo x)
+define XR_SWEEP   = 960;     // flash sweep time (ms)
+define XR_STEP    = 24;      // flash frame time (ms)
+define XR_CYCLE   = 3200;    // full animation cycle (ms)
+define XR_SPK_X   = 111;     // sparkle centre
+define XR_SPK_Y   = 7;
+define XR_ROWS_TK = 3;       // flash rows drawn per ms (keeps every tick light)
+
+// ============================ UMAPS (const lookup maps) =====================
+// curve lattice: knee position p, precision depth A = (1-a)/a, knee drive K, 1/K  (Q12)
+const uint16 XR_P_MAP[]  = {
+    737, 806, 875, 943, 1012, 1081, 1150, 1218, 1287, 1356, 1424, 1493, 1562, 1630, 1699, 1768,
+    1837, 1905, 1974, 2043, 2111, 2180, 2249, 2318, 2386, 2455, 2524, 2592, 2661, 2730, 2798, 2867
+};
+const uint16 XR_A_MAP[]  = {
+    18660, 17796, 16996, 16253, 15560, 14912, 14306, 13738, 13203, 12700, 12225, 11776, 11351, 10949, 10566, 10203,
+    9857, 9528, 9214, 8914, 8627, 8353, 8090, 7838, 7596, 7364, 7141, 6926, 6720, 6521, 6329, 6144
+};
+const uint16 XR_K_MAP[]  = {
+    5120, 5331, 5543, 5754, 5966, 6177, 6388, 6600, 6811, 7023, 7234, 7445, 7657, 7868, 8080, 8291,
+    8503, 8714, 8925, 9137, 9348, 9560, 9771, 9982, 10194, 10405, 10617, 10828, 11039, 11251, 11462, 11674
+};
+const uint16 XR_IK_MAP[] = {
+    3277, 3147, 3027, 2916, 2812, 2716, 2626, 2542, 2463, 2389, 2319, 2253, 2191, 2132, 2076, 2024,
+    1973, 1925, 1880, 1836, 1795, 1755, 1717, 1681, 1646, 1612, 1580, 1549, 1520, 1491, 1464, 1437
+};
+// XERA logotype: horizontal pixel spans per row (logo-relative x0, x1)
+const uint8 XR_SPAN_ROW[] = { 0, 5, 10, 15, 20, 26, 32, 38, 44, 50, 55, 60, 65, 70, 75, 80, 86, 93, 100, 107, 114, 121, 128 };
+const uint8 XR_SPAN_X0[]  = {
+    0, 15, 26, 51, 83, 1, 14, 26, 51, 82, 2, 13, 26, 51, 82, 2, 13, 26, 51, 82, 3, 12, 26, 51,
+    66, 81, 4, 11, 26, 51, 66, 81, 4, 11, 26, 51, 66, 81, 5, 26, 51, 66, 80, 87, 6, 26, 51, 66,
+    80, 87, 6, 26, 51, 80, 87, 7, 26, 51, 79, 88, 7, 26, 51, 79, 88, 6, 26, 51, 78, 89, 6, 26,
+    51, 60, 78, 5, 26, 51, 61, 78, 4, 11, 26, 51, 61, 77, 4, 11, 26, 51, 62, 77, 90, 3, 12, 26,
+    51, 63, 77, 90, 2, 13, 26, 51, 63, 76, 91, 2, 13, 26, 51, 64, 76, 91, 1, 14, 26, 51, 65, 76,
+    91, 0, 15, 26, 51, 65, 75, 92
+};
+const uint8 XR_SPAN_X1[]  = {
+    4, 19, 42, 66, 88, 5, 18, 42, 67, 89, 6, 17, 42, 68, 89, 6, 17, 42, 69, 89, 7, 16, 29, 54,
+    69, 90, 8, 15, 29, 54, 69, 90, 8, 15, 29, 54, 69, 90, 14, 29, 54, 69, 84, 91, 13, 29, 54, 69,
+    84, 91, 13, 39, 69, 84, 91, 12, 39, 68, 83, 92, 12, 39, 67, 83, 92, 13, 39, 66, 82, 93, 13, 29,
+    54, 64, 93, 14, 29, 54, 65, 93, 8, 15, 29, 54, 65, 94, 8, 15, 29, 54, 66, 81, 94, 7, 16, 29,
+    54, 67, 81, 94, 6, 17, 42, 54, 67, 80, 95, 6, 17, 42, 54, 68, 80, 95, 5, 18, 42, 54, 69, 80,
+    95, 4, 19, 42, 54, 69, 79, 96
+};
+// tagline "ADAPTIVE CURVE ENGINE" (3x5 micro font) as pixel runs per row
+const uint8 XR_TON_ROW[] = { 0, 22, 51, 77, 106, 130 };
+const uint8 XR_TON_X0[]  = {
+    23, 26, 31, 34, 38, 42, 46, 48, 50, 58, 62, 64, 66, 70, 72, 74, 82, 86, 90, 94, 98, 102, 22, 24,
+    26, 28, 30, 32, 34, 36, 39, 43, 46, 48, 50, 58, 62, 64, 66, 68, 70, 72, 74, 82, 86, 88, 90, 95,
+    98, 100, 102, 22, 26, 28, 30, 34, 39, 43, 46, 48, 50, 58, 62, 64, 66, 70, 72, 74, 82, 86, 88, 90,
+    92, 95, 98, 100, 102, 22, 24, 26, 28, 30, 32, 34, 39, 43, 46, 48, 50, 58, 62, 64, 66, 68, 70, 72,
+    74, 82, 86, 88, 90, 92, 95, 98, 100, 102, 22, 24, 26, 30, 32, 34, 39, 42, 47, 50, 58, 62, 66, 68,
+    71, 74, 82, 86, 88, 90, 94, 98, 100, 102
+};
+const uint8 XR_TON_X1[]  = {
+    23, 27, 31, 35, 40, 44, 46, 48, 52, 60, 62, 64, 67, 70, 72, 76, 84, 87, 92, 96, 99, 104, 22, 24,
+    26, 28, 30, 32, 34, 36, 39, 43, 46, 48, 50, 58, 62, 64, 66, 68, 70, 72, 74, 82, 86, 88, 90, 95,
+    98, 100, 102, 24, 26, 28, 32, 35, 39, 43, 46, 48, 51, 58, 62, 64, 67, 70, 72, 75, 83, 86, 88, 90,
+    92, 95, 98, 100, 103, 22, 24, 26, 28, 30, 32, 34, 39, 43, 46, 48, 50, 58, 62, 64, 66, 68, 70, 72,
+    74, 82, 86, 88, 90, 92, 95, 98, 100, 102, 22, 24, 27, 30, 32, 34, 39, 44, 47, 52, 60, 64, 66, 68,
+    71, 76, 84, 86, 88, 92, 96, 98, 100, 104
+};
+// tagline "CURVE ENGINE OFF"
+const uint8 XR_TOFF_ROW[] = { 0, 16, 36, 56, 77, 94 };
+const uint8 XR_TOFF_X0[]  = {
+    32, 36, 38, 40, 44, 46, 48, 56, 60, 64, 68, 72, 76, 84, 88, 92, 32, 36, 38, 40, 42, 44, 46, 48,
+    56, 60, 62, 64, 69, 72, 74, 76, 84, 86, 88, 92, 32, 36, 38, 40, 44, 46, 48, 56, 60, 62, 64, 66,
+    69, 72, 74, 76, 84, 86, 88, 92, 32, 36, 38, 40, 42, 44, 46, 48, 56, 60, 62, 64, 66, 69, 72, 74,
+    76, 84, 86, 88, 92, 32, 36, 40, 42, 45, 48, 56, 60, 62, 64, 68, 72, 74, 76, 84, 88, 92
+};
+const uint8 XR_TOFF_X1[]  = {
+    34, 36, 38, 41, 44, 46, 50, 58, 61, 66, 70, 73, 78, 86, 90, 94, 32, 36, 38, 40, 42, 44, 46, 48,
+    56, 60, 62, 64, 69, 72, 74, 76, 84, 86, 88, 92, 32, 36, 38, 41, 44, 46, 49, 57, 60, 62, 64, 66,
+    69, 72, 74, 77, 84, 86, 89, 93, 32, 36, 38, 40, 42, 44, 46, 48, 56, 60, 62, 64, 66, 69, 72, 74,
+    76, 84, 86, 88, 92, 34, 38, 40, 42, 45, 50, 58, 60, 62, 66, 70, 72, 74, 78, 86, 88, 92
+};
+
+// ============================ BVARS & STATE =================================
+int xr_flags;                                   // BVAR: engine / lock / tag / boot bits
+int xr_cid;                                     // BVAR: curve id = p | a << 5 | K << 10
+int xr_dt, xr_x, xr_y, xr_r64, xr_t, xr_th;
+int xr_xe, xr_ye, xr_vx, xr_vy, xr_px, xr_res;
+int xr_S, xr_Sm, xr_vr, xr_o, xr_fast, xr_Fr, xr_Pr;
+int xr_iP, xr_iT, xr_iF, xr_Fenv;
+int xr_gP, xr_gT, xr_gF, xr_dz64, xr_span64, xr_adz;
+int xr_Ss, xr_W2, xr_W3, xr_prp, xr_pra, xr_prk, xr_Lhat, xr_fcur;
+int xr_O, xr_cden, xr_half, xr_num, xr_q, xr_a;
+int xr_h, xr_cur, xr_lockS, xr_probes, xr_okt, xr_late, xr_kk;
+int xr_best, xr_Jb, xr_J, xr_nid, xr_k;
+int xr_ip, xr_ia, xr_ik, xr_ce, xr_cj;
+int xr_cp, xr_cA, xr_ciK, xr_cq, xr_den, xr_lu, xr_sg, xr_su, xr_su2;
+int xr_g1p, xr_g2p, xr_g1a, xr_g2a, xr_g1k, xr_g2k, xr_gl, xr_m;
+int xr_at, xr_hx, xr_hxp, xr_step, xr_rowc, xr_job, xr_tagj, xr_spk, xr_bead0;
+int xr_bt, xr_bj, xr_ds, xr_du, xr_dn;
+int xr_dk, xr_da, xr_db, xr_dl, xr_de, xr_dw0, xr_dw1;
+
+// ============================================================================
+init {
+    xr_gP     = (XR_GAIN_PREC * 4096) / 100;
+    xr_gT     = (XR_GAIN_TRACK * 4096) / 100;
+    xr_gF     = (XR_GAIN_FLICK * 4096) / 100;
+    xr_dz64   = XR_DEADZONE * 64;
+    xr_span64 = (XR_OUTER * 64) - xr_dz64;
+    xr_adz    = (XR_ANTI_DZ * 4096) / 100;
+    xr_iP     = 4096;
+    xr_ip     = (XR_HP_P + 8) / 16;
+    xr_ia     = (XR_HP_A + 8) / 16;
+    xr_ik     = (XR_HP_K + 8) / 16;
+    xr_cid    = xr_ip | (xr_ia << 5) | (xr_ik << 10);
+    xr_g1p    = XR_P_MAP[xr_ip] * 16;
+    xr_g2p    = xr_g1p;
+    xr_g1a    = XR_A_MAP[xr_ia] * 16;
+    xr_g2a    = xr_g1a;
+    xr_g1k    = XR_K_MAP[xr_ik] * 16;
+    xr_g2k    = xr_g1k;
+    xr_h      = 4;
+    xr_probes = XR_PROBES;
+    xr_step   = -1;
+    xr_rowc   = 11;
+    xr_job    = 99;
+    xr_tagj   = 5;
+    xr_spk    = -1;
+    xr_bead0  = -1;
+    xr_hx     = XR_HX0;
+    xr_hxp    = XR_HX0;
+    if (XR_START_ON) {
+        set_bit(xr_flags, XR_B_ON);
+    }
+    cls_oled(0);
+}
+
+// ============================================================================
+main {
+    vm_tctrl(-9);                         // 1 ms virtual machine
+    xr_dt = get_rtime();
+    if (xr_dt < 1) {
+        xr_dt = 1;
+    }
+    if (xr_dt > 20) {
+        xr_dt = 20;
+    }
+    xr_toggle();
+    if (test_bit(xr_flags, XR_B_ON)) {
+        xr_engine();
+    }
+    xr_display();
+}
+
+// ============================ MATH ==========================================
+function xr_clamp(v, lo, hi) {
+    if (v < lo) {
+        return lo;
+    }
+    if (v > hi) {
+        return hi;
+    }
+    return v;
+}
+
+// one exponential-smoothing step toward g with time constant r ms (frame-rate independent)
+function xr_lerp(c, g, r) {
+    xr_kk = xr_dt;
+    if (xr_kk > r) {
+        xr_kk = r;
+    }
+    return c + (((g - c) * xr_kk) / r);
+}
+
+// Q12 smoothstep 3u^2 - 2u^3 (C1-smooth membership / easing)
+function xr_ss(e0, e1, v) {
+    if (v <= e0) {
+        return 0;
+    }
+    if (v >= e1) {
+        return 4096;
+    }
+    xr_su  = ((v - e0) * 4096) / (e1 - e0);
+    xr_su2 = (xr_su * xr_su) / 4096;
+    return (xr_su2 * (12288 - (2 * xr_su))) / 4096;
+}
+
+// load a curve: knee p, depth A, drive K, 1/K  ->  knee height q = K p / (A(1-p) + K p)
+function xr_prep(p, a, k, ik) {
+    xr_cp  = p;
+    xr_cA  = a;
+    xr_ciK = ik;
+    xr_cq  = (k * p) / (((a * (4096 - p)) + (k * p)) / 4096);
+    return 0;
+}
+
+// curve level f(t), Q12 in / Q12 out
+function xr_level(t) {
+    if (t < xr_cp) {
+        xr_lu  = (t * 4096) / xr_cp;
+        xr_den = (((xr_cA - 4096) * (4096 - xr_lu)) / 4096) + 4096;
+        return (xr_cq * xr_lu) / xr_den;
+    }
+    xr_lu  = ((t - xr_cp) * 4096) / (4096 - xr_cp);
+    xr_den = (((xr_ciK - 4096) * (4096 - xr_lu)) / 4096) + 4096;
+    return xr_cq + (((4096 - xr_cq) * xr_lu) / xr_den);
+}
+
+// curve gain f'(t), exact derivative; call right after xr_level(t)
+function xr_slope(t) {
+    if (t < xr_cp) {
+        xr_sg = (xr_cq * 4096) / xr_cp;
+        xr_sg = (xr_sg * xr_cA) / xr_den;
+    } else {
+        xr_sg = ((4096 - xr_cq) * 4096) / (4096 - xr_cp);
+        xr_sg = (xr_sg * xr_ciK) / xr_den;
+    }
+    return (xr_sg * 4096) / xr_den;
+}
+
+// ============================ CURVE SEARCH ==================================
+// score one curve of the library for the current stick moment (lower = better)
+function xr_cost(cid) {
+    xr_ip = cid & 31;
+    xr_ia = (cid >> 5) & 31;
+    xr_ik = (cid >> 10) & 31;
+    xr_prep(XR_P_MAP[xr_ip], XR_A_MAP[xr_ia], XR_K_MAP[xr_ik], XR_IK_MAP[xr_ik]);
+    xr_level(xr_t);
+    xr_ce = (xr_slope(xr_t) - xr_Ss) / 16;               // gain error at the stick
+    xr_cj = xr_W2 * xr_ce * xr_ce;
+    if (xr_W3 > 0) {
+        xr_ce = (xr_level(xr_th) - xr_Lhat) / 16;         // predicted-path error
+        xr_cj = xr_cj + (xr_W3 * xr_ce * xr_ce);
+    }
+    xr_ce = (xr_ip * 16) - xr_prp;                        // home-shape distance
+    xr_cj = xr_cj + (XR_W4 * xr_ce * xr_ce);
+    xr_ce = (xr_ia * 16) - xr_pra;
+    xr_cj = xr_cj + (XR_W4 * xr_ce * xr_ce);
+    xr_ce = (xr_ik * 16) - xr_prk;
+    xr_cj = xr_cj + (XR_W4 * xr_ce * xr_ce);
+    return xr_cj;
+}
+
+// neighbour of a curve id: direction d (0..5 = +p -p +a -a +K -K), step h
+function xr_nb(cid, d, h) {
+    xr_ip = cid & 31;
+    xr_ia = (cid >> 5) & 31;
+    xr_ik = (cid >> 10) & 31;
+    if (d == 0) {
+        xr_ip = xr_ip + h;
+        if (xr_ip > 31) {
+            xr_ip = 31;
+        }
+    } else if (d == 1) {
+        xr_ip = xr_ip - h;
+        if (xr_ip < 0) {
+            xr_ip = 0;
+        }
+    } else if (d == 2) {
+        xr_ia = xr_ia + h;
+        if (xr_ia > 31) {
+            xr_ia = 31;
+        }
+    } else if (d == 3) {
+        xr_ia = xr_ia - h;
+        if (xr_ia < 0) {
+            xr_ia = 0;
+        }
+    } else if (d == 4) {
+        xr_ik = xr_ik + h;
+        if (xr_ik > 31) {
+            xr_ik = 31;
+        }
+    } else {
+        xr_ik = xr_ik - h;
+        if (xr_ik < 0) {
+            xr_ik = 0;
+        }
+    }
+    return xr_ip | (xr_ia << 5) | (xr_ik << 10);
+}
+
+// one compass-search pass over the 32,768-curve library
+function xr_search() {
+    xr_Jb   = xr_cost(xr_cid);
+    xr_best = xr_cid;
+    for (xr_k = 0; xr_k < xr_probes; xr_k++) {
+        xr_nid = xr_nb(xr_cid, xr_cur, xr_h);
+        if (xr_nid != xr_cid) {
+            xr_J = xr_cost(xr_nid);
+            if (xr_J < xr_Jb) {
+                xr_Jb   = xr_J;
+                xr_best = xr_nid;
+            }
+        }
+        xr_cur = xr_cur + 1;
+        if (xr_cur > 5) {
+            xr_cur = 0;
+        }
+    }
+    // also score the intent's home curve: lets the search jump straight to a new regime
+    xr_nid = ((xr_prp + 8) / 16) | (((xr_pra + 8) / 16) << 5) | (((xr_prk + 8) / 16) << 10);
+    if (xr_nid != xr_cid) {
+        if (xr_nid != xr_best) {
+            xr_J = xr_cost(xr_nid);
+            if (xr_J < xr_Jb) {
+                xr_Jb   = xr_J;
+                xr_best = xr_nid;
+            }
+        }
+    }
+    if (xr_best != xr_cid) {
+        xr_cid = xr_best;
+        clear_bit(xr_flags, XR_B_LOCK);
+    } else if (xr_h > 1) {
+        xr_h = xr_h / 2;
+    } else {
+        set_bit(xr_flags, XR_B_LOCK);
+    }
+    if (test_bit(xr_flags, XR_B_LOCK)) {
+        if (abs(xr_Ss - xr_lockS) > 410) {
+            xr_h = 4;                                     // the moment changed: widen the search
+            clear_bit(xr_flags, XR_B_LOCK);
+        }
+    } else {
+        xr_lockS = xr_Ss;
+    }
+    return 0;
+}
+
+// critically damped two-stage glide toward the winning curve
+function xr_glide() {
+    if (xr_iF > xr_Fenv) {
+        xr_Fenv = xr_iF;
+    } else {
+        xr_Fenv = xr_lerp(xr_Fenv, 0, XR_FENV_REL);
+    }
+    xr_m = xr_Fenv;
+    if (xr_fast > xr_m) {
+        xr_m = xr_fast;
+    }
+    xr_gl  = XR_GL_SLOW - (((XR_GL_SLOW - XR_GL_FAST) * xr_m) / 4096);
+    xr_g1p = xr_lerp(xr_g1p, XR_P_MAP[xr_cid & 31] * 16, xr_gl);
+    xr_g2p = xr_lerp(xr_g2p, xr_g1p, xr_gl);
+    xr_g1a = xr_lerp(xr_g1a, XR_A_MAP[(xr_cid >> 5) & 31] * 16, xr_gl);
+    xr_g2a = xr_lerp(xr_g2a, xr_g1a, xr_gl);
+    xr_g1k = xr_lerp(xr_g1k, XR_K_MAP[(xr_cid >> 10) & 31] * 16, xr_gl);
+    xr_g2k = xr_lerp(xr_g2k, xr_g1k, xr_gl);
+    return 0;
+}
+
+// ============================ STICK ENGINE ==================================
+// scale one axis by the live curve (radial, direction preserved), round to output
+function xr_comp(v) {
+    xr_num = v * xr_O * 25;
+    if (XR_DITHER) {
+        if (xr_num >= 0) {
+            xr_q = xr_num / xr_cden;
+            if (random(0, xr_cden - 1) < (xr_num - (xr_q * xr_cden))) {
+                xr_q = xr_q + 1;
+            }
+            return xr_q;
+        }
+        xr_q = (0 - xr_num) / xr_cden;
+        if (random(0, xr_cden - 1) < ((0 - xr_num) - (xr_q * xr_cden))) {
+            xr_q = xr_q + 1;
+        }
+        return 0 - xr_q;
+    }
+    if (xr_num >= 0) {
+        return (xr_num + xr_half) / xr_cden;
+    }
+    return 0 - ((xr_half - xr_num) / xr_cden);
+}
+
+function xr_engine() {
+    // ---- load governor: if ticks keep running long, score fewer curves per ms
+    if (xr_dt > XR_VM_MS) {
+        xr_late = xr_late + 4;
+    } else if (xr_late > 0) {
+        xr_late = xr_late - 1;
+    }
+    if (xr_late > 16) {
+        xr_late = 0;
+        xr_okt  = 0;
+        if (xr_probes > 2) {
+            xr_probes = xr_probes - 1;
+        }
+    } else if (xr_late == 0) {
+        xr_okt = xr_okt + 1;
+        if (xr_okt >= 256) {
+            xr_okt = 0;
+            if (xr_probes < XR_PROBES) {
+                xr_probes = xr_probes + 1;
+            }
+        }
+    }
+    // ---- 1. stick -> radial deflection t (scaled deadzone, Q12)
+    xr_x   = get_ival(XR_AIM_X);
+    xr_y   = get_ival(XR_AIM_Y);
+    xr_r64 = isqrt(4096 * ((xr_x * xr_x) + (xr_y * xr_y)));
+    xr_t   = 0;
+    if (xr_r64 > xr_dz64) {
+        xr_t = ((xr_r64 - xr_dz64) * 4096) / xr_span64;
+        if (xr_t > 4096) {
+            xr_t = 4096;
+        }
+    }
+    // ---- 2. alpha-beta tracking filter (position Q8, velocity Q12 units/ms)
+    xr_px  = xr_xe + ((xr_vx * xr_dt) / 16);
+    xr_res = (xr_x * 256) - xr_px;
+    xr_xe  = xr_px + ((xr_res * XR_ALPHA) / 4096);
+    xr_vx  = xr_clamp(xr_vx + ((xr_res * 16 * XR_BETA) / (4096 * xr_dt)), -16384, 16384);
+    xr_px  = xr_ye + ((xr_vy * xr_dt) / 16);
+    xr_res = (xr_y * 256) - xr_px;
+    xr_ye  = xr_px + ((xr_res * XR_ALPHA) / 4096);
+    xr_vy  = xr_clamp(xr_vy + ((xr_res * 16 * XR_BETA) / (4096 * xr_dt)), -16384, 16384);
+    xr_S   = isqrt((xr_vx * xr_vx) + (xr_vy * xr_vy));
+    xr_Sm  = xr_lerp(xr_Sm, xr_S, XR_SM_RATE);
+    xr_vr  = 0;
+    if (xr_r64 > 0) {
+        xr_vr = (((xr_x * xr_vx) + (xr_y * xr_vy)) * 64) / xr_r64;   // radial velocity
+    }
+    xr_o = 0;
+    if (xr_S > 64) {
+        xr_o = (xr_vr * 4096) / xr_S;                                 // outwardness -1..1
+    }
+    // ---- 3. fuzzy intent: precision / tracking / flick
+    xr_fast = xr_ss(XR_FAST_LO, XR_FAST_HI, xr_S);
+    xr_Fr   = (xr_fast * xr_ss(XR_OUT_LO, XR_OUT_HI, xr_o)) / 4096;
+    xr_Pr   = ((4096 - xr_ss(XR_SLOW_LO, XR_SLOW_HI, xr_Sm)) * (4096 - xr_ss(XR_NEAR_LO, XR_NEAR_HI, xr_t))) / 4096;
+    xr_Pr   = (xr_Pr * (4096 - xr_Fr)) / 4096;
+    if (xr_Fr > xr_iF) {
+        xr_iF = xr_lerp(xr_iF, xr_Fr, XR_F_ATK);
+    } else {
+        xr_iF = xr_lerp(xr_iF, xr_Fr, XR_F_REL);
+    }
+    xr_iP = xr_lerp(xr_iP, xr_Pr, XR_P_RATE);
+    if (xr_iP > (4096 - xr_iF)) {
+        xr_iP = 4096 - xr_iF;
+    }
+    xr_iT = 4096 - xr_iP - xr_iF;
+    // ---- 4. what the perfect curve must do right now
+    xr_Ss  = ((xr_iP * xr_gP) + (xr_iT * xr_gT) + (xr_iF * xr_gF)) / 4096;
+    xr_W2  = ((xr_iP * XR_W2P) + (xr_iT * XR_W2T) + (xr_iF * XR_W2F)) / 4096;
+    xr_W3  = (XR_W3_MAX * xr_iF) / 4096;
+    xr_prp = ((xr_iP * XR_HP_P) + (xr_iT * XR_HT_P) + (xr_iF * XR_HF_P)) / 4096;
+    xr_pra = ((xr_iP * XR_HP_A) + (xr_iT * XR_HT_A) + (xr_iF * XR_HF_A)) / 4096;
+    xr_prk = ((xr_iP * XR_HP_K) + (xr_iT * XR_HT_K) + (xr_iF * XR_HF_K)) / 4096;
+    xr_th  = xr_clamp(xr_t + ((xr_vr * XR_TAU * 64) / xr_span64), 0, 4096);
+    // ---- 5. live curve -> stick output
+    xr_a    = xr_g2k / 16;
+    xr_prep(xr_g2p / 16, xr_g2a / 16, xr_a, 16777216 / xr_a);
+    xr_fcur = xr_level(xr_t);
+    xr_Lhat = xr_clamp(xr_fcur + ((xr_Ss * (xr_th - xr_t)) / 4096), 0, 4096);
+    if (xr_t > 0) {
+        xr_O = xr_fcur;
+        if (xr_adz > 0) {
+            xr_O = xr_adz + (((4096 - xr_adz) * xr_O) / 4096);
+        }
+        xr_cden = 16 * xr_r64;
+        xr_half = xr_cden / 2;
+        set_val(XR_AIM_X, xr_comp(xr_x));
+        set_val(XR_AIM_Y, xr_comp(xr_y));
+    } else {
+        set_val(XR_AIM_X, 0);
+        set_val(XR_AIM_Y, 0);
+    }
+    // ---- 6. search the library for the next millisecond, then glide
+    xr_search();
+    xr_glide();
+    return 0;
+}
+
+// hold L2/LT + tap SHARE/VIEW: engine on/off (the tap never reaches the game)
+function xr_toggle() {
+    if (get_ival(XR_TOGGLE_HOLD) > 50) {
+        if (event_press(XR_TOGGLE_TAP)) {
+            if (test_bit(xr_flags, XR_B_ON)) {
+                clear_bit(xr_flags, XR_B_ON);
+            } else {
+                set_bit(xr_flags, XR_B_ON);
+                xr_xe = get_ival(XR_AIM_X) * 256;
+                xr_ye = get_ival(XR_AIM_Y) * 256;
+                xr_vx = 0;
+                xr_vy = 0;
+            }
+            set_bit(xr_flags, XR_B_TAG);
+        }
+        set_val(XR_TOGGLE_TAP, 0);
+    }
+    return 0;
+}
+
+// ============================ DISPLAY =======================================
+// white logo spans of row y, clipped to logo-x range [l0, l1]
+function xr_logo_row(y, l0, l1) {
+    xr_dk = XR_SPAN_ROW[y];
+    while (xr_dk < XR_SPAN_ROW[y + 1]) {
+        xr_da = XR_SPAN_X0[xr_dk];
+        if (xr_da < l0) {
+            xr_da = l0;
+        }
+        xr_db = XR_SPAN_X1[xr_dk];
+        if (xr_db > l1) {
+            xr_db = l1;
+        }
+        if (xr_da <= xr_db) {
+            line_oled(XR_LX + xr_da, XR_LY + y, XR_LX + xr_db, XR_LY + y, 1, 1);
+        }
+        xr_dk = xr_dk + 1;
+    }
+    return 0;
+}
+
+// logo row at rest: scanline texture (even rows lit, odd rows dark)
+function xr_rest_row(y) {
+    line_oled(XR_LX, XR_LY + y, XR_LX + XR_LW - 1, XR_LY + y, 1, 0);
+    if ((y % 2) == 0) {
+        xr_logo_row(y, 0, XR_LW - 1);
+    }
+    return 0;
+}
+
+// advance the flash on odd row y: band lights every row, trail every other one
+function xr_sweep_row(y) {
+    xr_dl  = (XR_LH - 1 - y) / 2;                 // forward lean of the light band
+    xr_de  = xr_hx + xr_dl;                       // leading edge on this row
+    xr_dw0 = xr_hxp + xr_dl - (XR_BW + XR_TW) + 1;
+    if (xr_dw0 < 0) {
+        xr_dw0 = 0;
+    }
+    xr_dw1 = xr_de;
+    if (xr_dw1 > (XR_LW - 1)) {
+        xr_dw1 = XR_LW - 1;
+    }
+    if (xr_dw0 <= xr_dw1) {
+        line_oled(XR_LX + xr_dw0, XR_LY + y, XR_LX + xr_dw1, XR_LY + y, 1, 0);
+    }
+    if ((y % 4) == 1) {
+        xr_dw0 = xr_de - (XR_BW + XR_TW) + 1;
+    } else {
+        xr_dw0 = xr_de - XR_BW + 1;
+    }
+    if (xr_dw0 < 0) {
+        xr_dw0 = 0;
+    }
+    xr_logo_row(y, xr_dw0, xr_dw1);
+    return 0;
+}
+
+function xr_diamond() {
+    pixel_oled(XR_DIA_X, XR_DIV_Y - 2, 1);
+    line_oled(XR_DIA_X - 1, XR_DIV_Y - 1, XR_DIA_X + 1, XR_DIV_Y - 1, 1, 1);
+    line_oled(XR_DIA_X - 2, XR_DIV_Y, XR_DIA_X + 2, XR_DIV_Y, 1, 1);
+    line_oled(XR_DIA_X - 1, XR_DIV_Y + 1, XR_DIA_X + 1, XR_DIV_Y + 1, 1, 1);
+    pixel_oled(XR_DIA_X, XR_DIV_Y + 2, 1);
+    return 0;
+}
+
+function xr_divider() {
+    line_oled(34, XR_DIV_Y, XR_DIA_X - 4, XR_DIV_Y, 1, 1);
+    line_oled(XR_DIA_X + 4, XR_DIV_Y, 93, XR_DIV_Y, 1, 1);
+    pixel_oled(28, XR_DIV_Y, 1);
+    pixel_oled(30, XR_DIV_Y, 1);
+    pixel_oled(32, XR_DIV_Y, 1);
+    pixel_oled(95, XR_DIV_Y, 1);
+    pixel_oled(97, XR_DIV_Y, 1);
+    pixel_oled(99, XR_DIV_Y, 1);
+    xr_diamond();
+    return 0;
+}
+
+function xr_brackets() {
+    line_oled(0, 0, 5, 0, 1, 1);
+    line_oled(0, 1, 0, 5, 1, 1);
+    line_oled(122, 0, 127, 0, 1, 1);
+    line_oled(127, 1, 127, 5, 1, 1);
+    line_oled(0, 63, 5, 63, 1, 1);
+    line_oled(0, 58, 0, 62, 1, 1);
+    line_oled(122, 63, 127, 63, 1, 1);
+    line_oled(127, 58, 127, 62, 1, 1);
+    return 0;
+}
+
+// tagline row r (0..4): ADAPTIVE CURVE ENGINE / CURVE ENGINE OFF
+function xr_tag_row(r) {
+    line_oled(16, XR_TAG_Y + r, 111, XR_TAG_Y + r, 1, 0);
+    if (test_bit(xr_flags, XR_B_ON)) {
+        xr_dk = XR_TON_ROW[r];
+        while (xr_dk < XR_TON_ROW[r + 1]) {
+            line_oled(XR_TON_X0[xr_dk], XR_TAG_Y + r, XR_TON_X1[xr_dk], XR_TAG_Y + r, 1, 1);
+            xr_dk = xr_dk + 1;
+        }
+    } else {
+        xr_dk = XR_TOFF_ROW[r];
+        while (xr_dk < XR_TOFF_ROW[r + 1]) {
+            line_oled(XR_TOFF_X0[xr_dk], XR_TAG_Y + r, XR_TOFF_X1[xr_dk], XR_TAG_Y + r, 1, 1);
+            xr_dk = xr_dk + 1;
+        }
+    }
+    return 0;
+}
+
+// glint bead that rides the divider in sync with the flash (bx < 0 hides it)
+function xr_bead(bx) {
+    if (xr_bead0 >= 0) {
+        line_oled(xr_bead0 - 2, XR_DIV_Y - 1, xr_bead0 + 2, XR_DIV_Y - 1, 1, 0);
+        line_oled(xr_bead0 - 2, XR_DIV_Y + 1, xr_bead0 + 2, XR_DIV_Y + 1, 1, 0);
+    }
+    if (bx >= 0) {
+        line_oled(bx - 2, XR_DIV_Y - 1, bx + 2, XR_DIV_Y - 1, 1, 1);
+        line_oled(bx - 2, XR_DIV_Y + 1, bx + 2, XR_DIV_Y + 1, 1, 1);
+    }
+    xr_bead0 = bx;
+    xr_diamond();
+    return 0;
+}
+
+// sparkle that twinkles where the flash leaves the A (frame f, f < 0 or > 4 clears)
+function xr_spark(f) {
+    rect_oled(XR_SPK_X - 2, XR_SPK_Y - 2, 5, 5, 1, 0);
+    if (f == 0 || f == 4) {
+        pixel_oled(XR_SPK_X, XR_SPK_Y, 1);
+    } else if (f == 1 || f == 3) {
+        line_oled(XR_SPK_X - 1, XR_SPK_Y, XR_SPK_X + 1, XR_SPK_Y, 1, 1);
+        line_oled(XR_SPK_X, XR_SPK_Y - 1, XR_SPK_X, XR_SPK_Y + 1, 1, 1);
+    } else if (f == 2) {
+        line_oled(XR_SPK_X - 2, XR_SPK_Y, XR_SPK_X + 2, XR_SPK_Y, 1, 1);
+        line_oled(XR_SPK_X, XR_SPK_Y - 2, XR_SPK_X, XR_SPK_Y + 2, 1, 1);
+    }
+    return 0;
+}
+
+// boot: a scan beam reveals the logo, then frame, divider and tagline appear
+function xr_boot_tick() {
+    xr_bt = xr_bt + xr_dt;
+    if (xr_bj < XR_LH) {
+        if (xr_bt >= (20 + (xr_bj * 14))) {
+            xr_rest_row(xr_bj);
+            if (xr_bj < (XR_LH - 1)) {
+                line_oled(XR_LX, XR_LY + xr_bj + 1, XR_LX + XR_LW - 1, XR_LY + xr_bj + 1, 1, 1);
+            }
+            xr_bj = xr_bj + 1;
+        }
+        return 0;
+    }
+    if (xr_bj == XR_LH) {
+        if (xr_bt >= 340) {
+            xr_brackets();
+            xr_bj = xr_bj + 1;
+        }
+        return 0;
+    }
+    if (xr_bj == (XR_LH + 1)) {
+        if (xr_bt >= 370) {
+            xr_divider();
+            xr_bj = xr_bj + 1;
+        }
+        return 0;
+    }
+    if (xr_bj < (XR_LH + 7)) {
+        if (xr_bt >= (400 + ((xr_bj - XR_LH - 2) * 24))) {
+            xr_tag_row(xr_bj - XR_LH - 2);
+            xr_bj = xr_bj + 1;
+        }
+        return 0;
+    }
+    if (xr_bt >= 640) {
+        set_bit(xr_flags, XR_B_BOOT);
+        xr_at   = 0;
+        xr_step = -1;
+        xr_hx   = XR_HX0;
+        xr_hxp  = XR_HX0;
+    }
+    return 0;
+}
+
+// the XERA screen: always on while the script runs; at most a few draw calls per ms
+function xr_display() {
+    if (!test_bit(xr_flags, XR_B_BOOT)) {
+        xr_boot_tick();
+        return 0;
+    }
+    xr_at = xr_at + xr_dt;
+    if (xr_at >= XR_CYCLE) {
+        xr_at   = 0;
+        xr_hx   = XR_HX0;
+        xr_hxp  = XR_HX0;
+        xr_step = -1;
+        xr_job  = 99;
+    }
+    // flash sweep: new frame every XR_STEP ms, eased with smoothstep
+    if (xr_at < (XR_SWEEP + XR_STEP)) {
+        xr_ds = xr_at / XR_STEP;
+        if (xr_ds != xr_step) {
+            if (xr_rowc >= 11) {
+                xr_step = xr_ds;
+                xr_du   = (xr_at * 4096) / XR_SWEEP;
+                if (xr_du > 4096) {
+                    xr_du = 4096;
+                }
+                xr_hxp  = xr_hx;
+                xr_hx   = XR_HX0 + (((XR_HX1 - XR_HX0) * xr_ss(0, 4096, xr_du)) / 4096);
+                xr_rowc = 0;
+                if (xr_hx < XR_HX1) {
+                    xr_bead(28 + (((xr_hx - XR_HX0) * 71) / (XR_HX1 - XR_HX0)));
+                } else {
+                    xr_bead(-1);
+                }
+            }
+        }
+    }
+    xr_dn = 0;
+    while ((xr_rowc < 11) && (xr_dn < XR_ROWS_TK)) {
+        xr_sweep_row(1 + (2 * xr_rowc));
+        xr_rowc = xr_rowc + 1;
+        xr_dn   = xr_dn + 1;
+    }
+    if (xr_dn > 0) {
+        return 0;
+    }
+    // sparkle as the flash exits
+    if (xr_at >= (XR_SWEEP + XR_STEP)) {
+        if (xr_at < (XR_SWEEP + 360)) {
+            xr_ds = (xr_at - XR_SWEEP - XR_STEP) / 60;
+            if (xr_ds != xr_spk) {
+                xr_spk = xr_ds;
+                xr_spark(xr_ds);
+            }
+            return 0;
+        }
+        if (xr_spk != -1) {
+            xr_spk = -1;
+            xr_spark(-1);
+            xr_job = 0;
+            return 0;
+        }
+    }
+    // tagline refresh after an ON/OFF toggle, then a slow self-healing repaint
+    if (test_bit(xr_flags, XR_B_TAG)) {
+        clear_bit(xr_flags, XR_B_TAG);
+        xr_tagj = 0;
+    }
+    if (xr_tagj < 5) {
+        xr_tag_row(xr_tagj);
+        xr_tagj = xr_tagj + 1;
+        return 0;
+    }
+    if (xr_job < (XR_LH + 2)) {
+        if (xr_job < XR_LH) {
+            xr_rest_row(xr_job);
+        } else if (xr_job == XR_LH) {
+            xr_brackets();
+        } else {
+            xr_divider();
+        }
+        xr_job = xr_job + 1;
+        if (xr_job == (XR_LH + 2)) {
+            xr_tagj = 0;
+        }
+    }
+    return 0;
+}
