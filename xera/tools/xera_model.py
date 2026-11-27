@@ -142,6 +142,7 @@ class Settings:
     GAIN_TRACK = 100
     GAIN_FLICK = 190
     PROBES = 6
+    LIMITER = 1
     VM_MS = 1
 
 
@@ -268,22 +269,23 @@ class Engine:
         s = self.s
         dt = max(1, min(20, dt))
         self.dt = dt
-        # governor
-        if dt > s.VM_MS:
-            self.late += 4
-        elif self.late > 0:
-            self.late -= 1
-        if self.late > 16:
-            self.late = 0
-            self.okt = 0
-            if self.probes > 2:
-                self.probes -= 1
-        elif self.late == 0:
-            self.okt += 1
-            if self.okt >= 256:
+        # load limiter (XR_LIMITER 0 bypasses it)
+        if s.LIMITER:
+            if dt > s.VM_MS:
+                self.late += 4
+            elif self.late > 0:
+                self.late -= 1
+            if self.late > 16:
+                self.late = 0
                 self.okt = 0
-                if self.probes < s.PROBES:
-                    self.probes += 1
+                if self.probes > 2:
+                    self.probes -= 1
+            elif self.late == 0:
+                self.okt += 1
+                if self.okt >= 256:
+                    self.okt = 0
+                    if self.probes < s.PROBES:
+                        self.probes += 1
         # 1. radial deflection
         r64 = isqrt(4096 * (x * x + y * y))
         t = 0

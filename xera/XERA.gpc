@@ -63,8 +63,8 @@
  *    - Raise XR_DEADZONE only if your stick drifts. If the game forces a
  *      deadzone, set XR_ANTI_DZ to roughly the same percent.
  *    - In Zen Studio, keep the Zen's CPU load under about 80%. If it is high,
- *      lower XR_PROBES. A built-in governor also backs off by itself
- *      whenever a 1 ms tick runs long.
+ *      lower XR_PROBES. The built-in limiter also backs off by itself
+ *      whenever 1 ms ticks keep running long (XR_LIMITER 0 bypasses it).
  * ======================================================================== */
 
 // ============================ USER SETTINGS =================================
@@ -78,6 +78,8 @@ define XR_GAIN_TRACK   = 100;        // local gain while tracking       (% of 1:
 define XR_GAIN_FLICK   = 190;        // local gain while flicking       (% of 1:1)
 define XR_DITHER       = 0;          // 1 = stochastic rounding (sub-1% precision)
 define XR_PROBES       = 6;          // neighbour curves scored per ms (2 - 6)
+define XR_LIMITER      = 1;          // 1 = scale the search back if 1 ms ticks run late
+                                     // 0 = bypass: always the full search, even if ticks stretch
 
 // ============================ ENGINE CONSTANTS ==============================
 // Fixed point: Q12 -> 4096 = 1.0.  Speeds in Q12 stick-units per ms.
@@ -612,24 +614,27 @@ function xr_comp(v) {
 }
 
 function xr_engine() {
-    // ---- load governor: if ticks keep running long, score fewer curves per ms
-    if (xr_dt > XR_VM_MS) {
-        xr_late = xr_late + 4;
-    } else if (xr_late > 0) {
-        xr_late = xr_late - 1;
-    }
-    if (xr_late > 16) {
-        xr_late = 0;
-        xr_okt  = 0;
-        if (xr_probes > 2) {
-            xr_probes = xr_probes - 1;
+    // ---- load limiter: if ticks keep running long, score fewer curves per ms
+    //      (XR_LIMITER 0 bypasses it: the search always scores XR_PROBES curves)
+    if (XR_LIMITER) {
+        if (xr_dt > XR_VM_MS) {
+            xr_late = xr_late + 4;
+        } else if (xr_late > 0) {
+            xr_late = xr_late - 1;
         }
-    } else if (xr_late == 0) {
-        xr_okt = xr_okt + 1;
-        if (xr_okt >= 256) {
-            xr_okt = 0;
-            if (xr_probes < XR_PROBES) {
-                xr_probes = xr_probes + 1;
+        if (xr_late > 16) {
+            xr_late = 0;
+            xr_okt  = 0;
+            if (xr_probes > 2) {
+                xr_probes = xr_probes - 1;
+            }
+        } else if (xr_late == 0) {
+            xr_okt = xr_okt + 1;
+            if (xr_okt >= 256) {
+                xr_okt = 0;
+                if (xr_probes < XR_PROBES) {
+                    xr_probes = xr_probes + 1;
+                }
             }
         }
     }

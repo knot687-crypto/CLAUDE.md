@@ -27,6 +27,7 @@ in without a bump, and the search starts again on the next millisecond.
 | `XR_GAIN_PREC` / `TRACK` / `FLICK` | 65 / 100 / 190 | Local gain (% of 1:1) the curve aims for while micro-aiming, tracking and flicking. |
 | `XR_DITHER` | 0 | Set to 1 for stochastic rounding, which averages finer than 1% output steps. |
 | `XR_PROBES` | 6 | Neighbour curves scored per ms. Lower it if Zen Studio shows a high CPU load. |
+| `XR_LIMITER` | 1 | 1 = scale the search back if 1 ms ticks keep running late. 0 = bypass it: always the full search, even if ticks stretch. |
 | `XR_AIM_X/Y` | RX / RY | The stick XERA drives (the right stick on both PlayStation and Xbox). |
 
 ## How it works
@@ -88,7 +89,7 @@ python3 tools/verify_xera.py --preview  # also re-renders the GIF and PNG
 
 | Check | Result |
 |---|---|
-| Script output vs reference model | 0 differences over 7,800 ms of realistic aiming and 20,000 ms of random fuzzing (corners, jumps, late ticks) |
+| Script output vs reference model | 0 differences over 7,800 ms of realistic aiming and 20,000 ms of random fuzzing (corners, jumps, late ticks). With the limiter bypassed, 6,000 ms of heavy overload still give 0 differences, with the full search on every tick |
 | Integer safety | no int32 overflow and no division by zero anywhere |
 | Curve library | all 16,777,216 base curves scanned in C: monotone, with f(0)=0 and f(1)=1. Reach is a monotone stretch, so this covers all 2^30 curves. S-shape bounds hold for every curve; fixed-point error ≤ 0.14% of full scale |
 | Search vs exhaustive scan | in 80 runs on 40 real stick moments: exact best of all 1,073,741,824 in 75%; never more than 0.36% off; 12 ms median to lock on |
@@ -110,7 +111,11 @@ Two things still need checking on real hardware:
   - curve math is skipped when its weight is zero;
   - while you flick, the screen draws less, so the search always has the tick to itself.
 
-  If the load is still high, lower `XR_PROBES` to 4 or 3. The built-in governor also steps down automatically when ticks keep running late. Every filter is frame-rate independent, so the feel stays the same at a 2 ms tick.
+  If the load is still high, lower `XR_PROBES` to 4 or 3. The built-in limiter also steps down automatically when ticks keep running late. Every filter is frame-rate independent, so the feel stays the same at a 2 ms tick.
+
+  **Bypassing the limiter (`XR_LIMITER = 0`):** the search then always scores the full `XR_PROBES` curves.
+  - If your Zen keeps up at 1 ms, nothing changes, because the limiter never engages.
+  - If it can't keep up, bypassing doesn't make it faster: ticks stretch instead. The stick then updates every ~2 ms rather than every 1 ms. That is still faster than the ~4 ms between console controller reads, but it is not zero.
 
 ## Files
 

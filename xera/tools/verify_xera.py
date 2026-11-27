@@ -198,6 +198,30 @@ def check_bitexact():
         bad += (out[RX], out[RY]) != (ex, ey)
     report('random fuzz', bad == 0, f'20000 ms incl. corners, jumps and {late} late ticks: '
            f'{bad} differing outputs, no int32 overflow, no /0')
+    # the same fuzz with the limiter bypassed (XR_LIMITER 0): full search on every tick
+    src = open(GPC_PATH).read()
+    on = 'define XR_LIMITER      = 1;'
+    assert src.count(on) == 1
+    mb = G.Machine(src.replace(on, 'define XR_LIMITER      = 0;'))
+    mb.run_init()
+
+    class Bypass(M.Settings):
+        LIMITER = 0
+    eng = M.Engine(Bypass)
+    rnd = random.Random(12)
+    bad = 0
+    probes = set()
+    for k in range(6000):
+        x = max(-100, min(100, rnd.randint(-100, 100) if rnd.random() < 0.01 else x + rnd.randint(-5, 5)))
+        y = max(-100, min(100, rnd.randint(-100, 100) if rnd.random() < 0.01 else y + rnd.randint(-5, 5)))
+        dt = 1 if rnd.random() > 0.4 else rnd.randint(2, 4)        # heavy overload
+        out = mb.tick({RX: x, RY: y}, dt)
+        ex, ey = eng.step(x, y, dt)
+        bad += (out[RX], out[RY]) != (ex, ey)
+        probes.add(mb.vars['xr_probes'])
+    report('limiter bypass', bad == 0 and probes == {mb.defines['XR_PROBES']},
+           f'XR_LIMITER 0 under heavy overload: full {sorted(probes)} probes on every tick, '
+           f'{bad} differing outputs vs the model')
     return ops, oled
 
 
