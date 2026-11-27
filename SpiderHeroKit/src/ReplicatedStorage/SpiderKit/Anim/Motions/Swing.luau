@@ -7,7 +7,7 @@
 	    SwingRise (legs kicking forward toward release)
 	  * body alignment: the whole body hangs along the rope toward the anchor, rolled toward the
 	    web hand like a real one-armed hang
-	  * web arm: two-bone IK reaches along the rope; the hand flashes the thwip trigger while the
+	  * web arm: two-bone IK reaches along the rope; the hand flashes the trigger sign while the
 	    web fires, then grips
 	  * two-handed grip: at high speed through the bottom the free hand grabs the line too
 	  * secondary motion: legs trail with the swing's angular velocity (critically damped)
@@ -165,7 +165,7 @@ function Swing:update(dt: number, ctx: any, out: { number })
 	local twoT = smoothstep(55, 85, speed) * (1 - smoothstep(14, 34, math.abs(deg))) * smoothstep(0.35, 0.6, self.t)
 	self.twoHand = Spring.damp(self.twoHand, twoT, 0.08, dt)
 	local handTargets = ac.handTarget
-	handTargets[webHand] = { if self.t < 0.13 then "Thwip" else "Grip", if self.t < 0.13 then "Thwip" else "Grip", 1 }
+	handTargets[webHand] = { if self.t < 0.13 then "Trigger" else "Grip", if self.t < 0.13 then "Trigger" else "Grip", 1 }
 	handTargets[freeHand] = if self.twoHand > 0.5 then { "Grip", "Grip", 1 } else { "Open", "Open", 1 }
 	ac.handHalflife[webHand] = 0.03
 end

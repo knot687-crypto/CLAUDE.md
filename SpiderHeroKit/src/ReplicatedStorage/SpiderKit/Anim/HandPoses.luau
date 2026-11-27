@@ -50,14 +50,16 @@ HandPoses.Presets = {
 		Pinky1 = { -4, 0, -76 }, Pinky2 = { 0, 0, -80 },
 	},
 	-- the web-shooter trigger: index and pinky straight, middle and ring pressed to the palm
-	Thwip = {
-		Thumb1 = { -28, 0, -8 }, Thumb2 = { 0, 0, -6 },
-		Index1 = { 9, 0, -2 }, Index2 = { 0, 0, 0 },
-		Middle1 = { 2, 0, -98 }, Middle2 = { 0, 0, -88 },
-		Ring1 = { -2, 0, -98 }, Ring2 = { 0, 0, -86 },
-		Pinky1 = { -12, 0, -3 }, Pinky2 = { 0, 0, 0 },
+	-- web shot: index and middle fingers extended together to aim, ring and pinky curled, the
+	-- thumb folded onto them pressing the cuff trigger
+	Trigger = {
+		Thumb1 = { 20, 0, 30 }, Thumb2 = { 0, 0, 35 },
+		Index1 = { 5, 0, -4 }, Index2 = { 0, 0, -2 },
+		Middle1 = { -1, 0, -6 }, Middle2 = { 0, 0, -4 },
+		Ring1 = { -2, 0, -96 }, Ring2 = { 0, 0, -100 },
+		Pinky1 = { -4, 0, -94 }, Pinky2 = { 0, 0, -98 },
 	},
-	-- clinging to a wall: spread wide, lightly curled
+
 	Splay = {
 		Thumb1 = { -30, 0, -4 }, Thumb2 = { 0, 0, -8 },
 		Index1 = { 14, 0, -10 }, Index2 = { 0, 0, -14 },
@@ -86,7 +88,7 @@ HandPoses.Presets = {
 	 much of that rest spread to close: -1 brings the fingers together, 0 keeps the rest spread. The
 	 preset's own rx values above are added on top. ]]
 local GATHER = {
-	Relaxed = -0.75, Open = -0.35, Fist = -1.0, Grip = -1.0, Thwip = -0.55, Splay = 0.0, Claw = -0.4, Point = -0.9,
+	Relaxed = -0.75, Open = -0.35, Fist = -1.0, Grip = -1.0, Trigger = -0.85, Splay = 0.0, Claw = -0.4, Point = -0.9,
 }
 local REST_SPREAD = {}
 for _, fname in RigDefinition.Fingers do

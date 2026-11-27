@@ -77,8 +77,8 @@ table.insert(clips, B.clip({
 		{ 0.16, { RightShoulder = { 92, 0, 22 }, RightElbow = { 10, 0, 0 }, RightWrist = { 0, 0, 24 } } },
 		{ 0.34, { RightShoulder = { 70, 0, 26 }, RightElbow = { 40, 0, 0 }, RightWrist = { 0, 0, 0 } } },
 	},
-	hands = { R = { { 0, "Open" }, { 0.05, "Thwip", 0.03 }, { 0.22, "Relaxed", 0.1 } } },
-	events = { { 0.07, "ThwipR" } },
+	hands = { R = { { 0, "Open" }, { 0.05, "Trigger", 0.03 }, { 0.22, "Relaxed", 0.1 } } },
+	events = { { 0.07, "WebShotR" } },
 }))
 table.insert(clips, B.clip({
 	name = "WebFireL",
@@ -89,8 +89,8 @@ table.insert(clips, B.clip({
 		{ 0.16, B.mirror({ RightShoulder = { 92, 0, 22 }, RightElbow = { 10, 0, 0 }, RightWrist = { 0, 0, 24 } }) },
 		{ 0.34, B.mirror({ RightShoulder = { 70, 0, 26 }, RightElbow = { 40, 0, 0 }, RightWrist = { 0, 0, 0 } }) },
 	},
-	hands = { L = { { 0, "Open" }, { 0.05, "Thwip", 0.03 }, { 0.22, "Relaxed", 0.1 } } },
-	events = { { 0.07, "ThwipL" } },
+	hands = { L = { { 0, "Open" }, { 0.05, "Trigger", 0.03 }, { 0.22, "Relaxed", 0.1 } } },
+	events = { { 0.07, "WebShotL" } },
 }))
 
 return clips

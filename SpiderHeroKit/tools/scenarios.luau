@@ -284,4 +284,157 @@ do
 	}
 end
 
+-- Perch on a rooftop edge, fire a web, zip to a far building, launch off the zip with a flip,
+-- land on that roof and jog to a stop.
+do
+	local target = Vector3.new(0, 52, -70)
+	local dir = nil
+	S.zip = {
+		scene = { boxes = {
+			{ center = { 0, 6, 8 }, size = { 16, 12, 16 } },
+			{ center = { 0, 30, -100 }, size = { 30, 60, 60 } },
+		} },
+		segments = {
+			{ 2.6, function(sim, dt, t, entered)
+				if entered then
+					sim.pos = Vector3.new(0, 12 + 3.3, 1.2)
+					sim.yaw = 0
+					sim.vel = Vector3.zero
+					sim.state = "Perch"
+					sim.groundY = 12
+					sim.gravity = false
+				end
+				sim.look = if t > 1.6 then (target - sim.pos).Unit else nil
+			end },
+			{ 0.22, function(sim, dt, t, entered)
+				if entered then
+					sim.ac:overlay("WebFireR", "RightArm")
+					sim.event("WebFire", { hand = "Right" })
+				end
+			end },
+			{ 0.72, function(sim, dt, t, entered)
+				if entered then
+					sim.state = "Zip"
+					sim.zipTarget = target
+					sim.anchor = target
+					sim.swingHand = "Right"
+				end
+				local d = target - sim.pos
+				if d.Magnitude > 3 then
+					dir = d.Unit
+					sim.vel = dir * (115 * math.min(1, t / 0.14))
+				else
+					sim.vel = dir * 40
+				end
+				sim.look = dir
+			end },
+			{ 1.0, function(sim, dt, t, entered)
+				if entered then
+					sim.state = "Air"
+					sim.gravity = true
+					sim.zipTarget = nil
+					sim.anchor = nil
+					sim.groundY = 60
+					local h = Vector3.new(dir.X, 0, dir.Z)
+					sim.vel = (h.Magnitude > 0.01 and h.Unit or sim.facing()) * 48 + Vector3.new(0, 70, 0)
+					sim.event("Trick", { name = "FrontFlip" })
+				end
+				sim.look = nil
+				if sim.state == "Ground" then
+					accelerateTo(sim, dt, 16, 90) -- the Humanoid brakes to run speed on touchdown
+				end
+			end },
+			{ 1.3, function(sim, dt, t)
+				if sim.state == "Ground" then
+					if t < 0.6 then
+						accelerateTo(sim, dt, 16, 60)
+					else
+						accelerateTo(sim, dt, 0, 80)
+					end
+				end
+			end },
+		},
+	}
+end
+
+-- Sprint at a building, run up its wall, vault over the roof edge, jog, stop and fire a web.
+do
+	local WALL_Z = -30
+	local TOP = 30
+	local function ease(u)
+		u = math.clamp(u, 0, 1)
+		return u * u * (3 - 2 * u)
+	end
+	local runStart, vaultFrom = nil, nil
+	S.wallrun = {
+		scene = { boxes = { { center = { 0, TOP / 2, WALL_Z - 15 }, size = { 30, TOP, 30 } } } },
+		segments = {
+			{ 1.3, function(sim, dt, t, entered)
+				if entered then
+					sim.pos = Vector3.new(0, 3.3, 10)
+					sim.yaw = 0
+					sim.groundY = 0
+				end
+				sim.sprint = true
+				accelerateTo(sim, dt, 36, 70)
+			end },
+			{ 0.95, function(sim, dt, t, entered)
+				if entered then
+					sim.state = "WallRun"
+					sim.gravity = false
+					sim.wallNormal = Vector3.new(0, 0, 1)
+					runStart = sim.pos
+				end
+				-- pivot about the feet at the wall base into the wall-running orientation, then run up
+				local a = ease(t / 0.16) * math.rad(90)
+				sim.tilt = CFrame.Angles(a, 0, 0)
+				local up = Vector3.new(0, math.cos(a), math.sin(a))
+				local feetY = math.max(0, t - 0.08) * 34
+				local feet = Vector3.new(0, feetY, WALL_Z)
+				sim.pos = feet + up * 3.3
+				sim.vel = Vector3.new(0, 34, 0)
+				sim.input = Vector3.new(0, 1, 0)
+			end },
+			{ 0.66, function(sim, dt, t, entered)
+				if entered then
+					sim.state = "Ledge"
+					vaultFrom = sim.pos
+					sim.event("LedgeVault", {})
+				end
+				-- carried up over the lip, then forward onto the roof, rotating upright
+				local u = t / 0.66
+				sim.tilt = CFrame.Angles((1 - ease(u / 0.4)) * math.rad(90), 0, 0)
+				local y = vaultFrom.Y + (TOP + 3.3 - vaultFrom.Y) * ease(u / 0.55)
+				local z = vaultFrom.Z + (WALL_Z - 2.2 - vaultFrom.Z) * ease((u - 0.25) / 0.75)
+				local np = Vector3.new(0, y, z)
+				sim.vel = (np - sim.pos) / dt
+				sim.pos = np - sim.vel * dt -- the integrator adds vel*dt
+			end },
+			{ 1.5, function(sim, dt, t, entered)
+				if entered then
+					sim.state = "Ground"
+					sim.tilt = nil
+					sim.groundY = TOP
+					sim.pos = Vector3.new(sim.pos.X, TOP + 3.3, sim.pos.Z)
+					sim.vel = Vector3.new(0, 0, -6)
+					sim.wallNormal = nil
+					sim.sprint = false
+				end
+				if t < 0.8 then
+					accelerateTo(sim, dt, 16, 50)
+				else
+					accelerateTo(sim, dt, 0, 70)
+				end
+			end },
+			{ 1.2, function(sim, dt, t, entered)
+				if entered then
+					sim.ac:overlay("WebFireR", "RightArm")
+					sim.look = Vector3.new(0.25, 0.45, -1).Unit
+				end
+				accelerateTo(sim, dt, 0, 70)
+			end },
+		},
+	}
+end
+
 return S

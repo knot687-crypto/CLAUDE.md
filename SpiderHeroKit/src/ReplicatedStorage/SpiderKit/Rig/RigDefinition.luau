@@ -7,7 +7,7 @@
 	* R15-compatible: the 15 standard body parts and Motor6D names/axes are used, so every clip in
 	  SpiderKit also plays on a regular R15 avatar, and standard R15 animations play on this rig.
 	* Adds 10 finger joints per hand (thumb, index, middle, ring, pinky x 2 segments) that the
-	  runtime drives with hand-pose presets (Relaxed, Fist, Thwip, Grip, Splay...).
+	  runtime drives with hand-pose presets (Relaxed, Fist, Trigger, Grip, Splay...).
 	* Rest pose: character faces -Z, feet on y = 0, arms hanging straight down, palms facing inward.
 	  All positions below are in "rest world space" (studs).
 
