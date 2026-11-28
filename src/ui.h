@@ -43,13 +43,13 @@ struct AppStatus {
     bool glassBackdrop = true;   // OS blur active behind the window
     int  glassLevel = 2;         // 0 none, 1 plain blur (Win10), 2 acrylic/mica (Win11)
     float crosshairAngle = 0.f;  // live angle from the overlay (radians)
-    std::string version = "1.0.0";
+    std::string version = "1.1.0";
 };
 
 class SettingsPanel {
 public:
-    static constexpr float kWidth = 920.f;   // DIPs
-    static constexpr float kHeight = 600.f;
+    static constexpr float kWidth = 960.f;   // DIPs
+    static constexpr float kHeight = 620.f;
 
     // Builds and draws one frame. `scale` = DPI scale (1.0 at 96 DPI).
     void frame(Canvas& cv, float scale, const UIInput& in, Settings& st, UIActions& out, const AppStatus& status);
@@ -62,10 +62,25 @@ public:
     // Force the next frame to be a full redraw.
     void invalidate() { fullDirty_ = true; }
     void resetInteraction();
+    // Call when the menu is shown: plays the entrance animation.
+    void onOpen(double time) { openTime_ = time; fullDirty_ = true; }
     // A text field currently has keyboard focus (Esc should not close the menu).
     bool textFocused() const { return focus_ != 0; }
 
 private:
+    struct Spring {
+        float x = 0, v = 0;
+    };
+    struct Ripple {
+        double t0 = -10;
+        float x = 0, y = 0;
+    };
+    struct ImageCache {  // pre-rendered static image (premultiplied BGRA)
+        std::vector<uint32_t> px;
+        std::string key;
+        int w = 0, h = 0;
+    };
+
     // ---- frame state
     Canvas* cv_ = nullptr;
     float s_ = 1.f;
@@ -74,7 +89,6 @@ private:
     Settings* st_ = nullptr;
     const AppStatus* status_ = nullptr;
     uint32_t hot_ = 0, active_ = 0, focus_ = 0;
-    uint32_t lastActive_ = 0;
     bool animating_ = false, previewAnimating_ = false, fullDirty_ = true;
     Rc previewPx_{}, dirty_{};
     float lastMx_ = -1e9f, lastMy_ = -1e9f;
@@ -82,12 +96,30 @@ private:
     float lastScale_ = 0.f;
     std::string lastSettings_;
     double armedAt_ = -10.0;
+    double openTime_ = -10.0;
+    double lastChange_ = -10.0;
     bool bindHovered_ = false;
     std::vector<Rc> headerHits_;
     std::unordered_map<uint32_t, float> anim_;
-    RGBA accent_{}, accentDeep_{}, accentText_{};
+    std::unordered_map<uint32_t, Spring> springs_;
+    std::unordered_map<uint32_t, Ripple> ripples_;
+    RGBA accent_{}, accentDeep_{}, accentText_{}, accentAlt_{};
     double pageSwitchTime_ = -10.0;
     int prevPage_ = 0;
+    // tooltip
+    uint32_t tipId_ = 0;
+    double tipStart_ = 0;
+    std::string tipText_;
+    Rc tipAnchor_{};
+    bool tipWanted_ = false;
+    // cached static glass background and gradient images
+    std::vector<uint32_t> bgCache_;
+    std::string bgKey_;
+    ImageCache pvBgCache_, svCache_, hueCache_, alphaCache_;
+    // static decorations (cards, preview shadow) baked on top of the glass for the current page
+    std::vector<uint32_t> bakeCache_;
+    std::string bakeKey_;
+    bool baking_ = false, cardsBaked_ = false;
     // colour picker state (kept in HSV so hue survives grey colours)
     float pickH_ = 0, pickS_ = 0, pickV_ = 1;
     RGBA pickLast_{-1, -1, -1, -1};
@@ -102,32 +134,41 @@ private:
     std::vector<uint32_t> previewBuf_;
     float previewAngle_ = 0.f;
     float hoverChipAngle_[16] = {};
-    float lastPreviewAngle_ = -1000.f;
 
     // ---- helpers
     Rc R(float x, float y, float w, float h) const { return Rc{x * s_, y * s_, w * s_, h * s_}; }
     float S(float v) const { return v * s_; }
+    float px1() const { return S(1.f) < 1.f ? 1.f : S(1.f); }
     float anim(uint32_t id, float target, float speed = 14.f);
+    float spring(uint32_t id, float target, float stiffness = 190.f, float damping = 19.f);
     bool hovered(const Rc& r) const;
     bool behave(uint32_t id, const Rc& r, bool* hover = nullptr, bool* held = nullptr);
     void label(float x, float y, const std::string& t, float size, int face, const RGBA& c, float tracking = 0.f);
-    void changed() { out_->settingsChanged = true; }
+    void changed();
+    float enter(float delay) const;  // entrance animation progress for a section
+    void ripple(uint32_t id, const Rc& r, float radius, const RGBA& c);
+    void tooltip(uint32_t id, const Rc& anchor, const std::string& text);
+    void drawTooltip();
 
     // ---- widgets
     bool toggle(uint32_t id, const Rc& r, bool& v);
     bool slider(uint32_t id, const Rc& r, float& v, float lo, float hi, float step = 0.f);
     bool segmented(uint32_t id, const Rc& r, const std::vector<std::string>& items, int& sel, float fontSize = 12.5f);
     bool button(uint32_t id, const Rc& r, const std::string& text, int style = 0, int icon = -1);
-    bool iconButton(uint32_t id, const Rc& r, int icon);
+    bool iconButton(uint32_t id, const Rc& r, int icon, const std::string& tip);
     void keycap(const Rc& r, const std::string& text, bool glowing);
     void icon(int which, float cx, float cy, float size, const RGBA& c);
-    void card(const Rc& r, float radius = 14.f);
+    void iconTile(int which, const Rc& r, int palette, float glow);
+    void card(const Rc& r, float radius = 16.f);
+    void valuePill(float right, float y, const std::string& v);
+    void microLabel(float x, float y, const std::string& t);
     void sliderRow(uint32_t id, float x, float y, float w, const std::string& name, const std::string& value,
                    float& v, float lo, float hi, float step = 0.f);
     void toggleRow(uint32_t id, float x, float y, float w, const std::string& name, const std::string& desc, bool& v);
 
     // ---- sections
-    void drawBackground();
+    void buildBackground();
+    void bakeStatic();
     void drawHeader();
     void drawSidebar();
     void drawPreview();
@@ -140,7 +181,9 @@ private:
     void colorPicker(float x, float y, float w, RGBA& color);
     void hexField(uint32_t id, const Rc& r, RGBA& color);
     void computeAccent();
-    void paintPreviewBackground(const Rc& r, int bg);
+    void paintPreviewBackground(Canvas& cv, const Rc& r, int bg);
+    template <class F>
+    void cachedImage(ImageCache& c, const char* tag, const Rc& r, const std::string& key, F&& paint);
 };
 
 }  // namespace vx

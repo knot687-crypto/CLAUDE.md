@@ -2,6 +2,7 @@
 // desktop) and the crosshair to PNG files, so the UI can be iterated on without
 // Windows. Build: see build.sh (target "preview").
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -66,6 +67,7 @@ int main(int argc, char** argv) {
     const int variant = argc > 6 ? std::atoi(argv[6]) : 0;
     const bool glass = argc > 7 ? std::atoi(argv[7]) != 0 : true;
     const int preset = argc > 8 ? std::atoi(argv[8]) : 0;
+    const float openAt = argc > 9 ? (float)std::atof(argv[9]) : -1.f;  // render the entrance animation at t seconds
 
     text().init();
     Settings st;
@@ -82,9 +84,35 @@ int main(int argc, char** argv) {
     UIInput in;
     in.mx = mx * scale;
     in.my = my * scale;
+    if (openAt >= 0.f) panel.onOpen(10.0 + 90 / 60.0 - openAt);
+    if (getenv("BENCH")) {
+        // time full redraws and preview-only redraws
+        auto now = [] { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); };
+        UIInput bi;
+        double t0 = now();
+        for (int f = 0; f < 60; ++f) {
+            bi.time = 100.0 + f / 60.0;
+            panel.invalidate();
+            UIActions a;
+            panel.frame(cv, scale, bi, st, a, status);
+        }
+        double t1 = now();
+        for (int f = 0; f < 60; ++f) {
+            bi.time = 200.0 + f / 60.0;
+            UIActions a;
+            panel.frame(cv, scale, bi, st, a, status);
+        }
+        double t2 = now();
+        std::printf("full redraw: %.2f ms/frame, preview-only: %.2f ms/frame (scale %.2f)\n", (t1 - t0) / 60 * 1000,
+                    (t2 - t1) / 60 * 1000, scale);
+        return 0;
+    }
+    const bool press = getenv("PRESS") != nullptr;
     for (int f = 0; f < 90; ++f) {
         in.time = 10.0 + f / 60.0;
         in.dt = 1.f / 60.f;
+        in.mousePressed = press && f == 75;
+        in.mouseDown = press && f >= 75;
         UIActions act;
         panel.frame(cv, scale, in, st, act, status);
     }

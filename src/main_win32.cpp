@@ -110,6 +110,7 @@ bool g_cursorsHidden = false;
 HANDLE g_guardProcess = nullptr;
 NOTIFYICONDATAW g_nid{};
 bool g_trayV4 = false;
+bool g_shuttingDown = false;
 
 double nowSec() {
     static LARGE_INTEGER freq = [] {
@@ -1011,6 +1012,7 @@ void showMenu(bool show) {
         g_menuVisible = true;
         g_panel.invalidate();
         g_panel.resetInteraction();
+        g_panel.onOpen(nowSec());
         g_in = UIInput();
         POINT cp;
         GetCursorPos(&cp);
@@ -1094,9 +1096,11 @@ LRESULT CALLBACK menuProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             }
             break;
         case WM_WINDOWPOSCHANGING: {
-            // the layout is fixed-size: never let snapping or the shell resize us
+            // the layout is fixed-size: never let snapping or the shell resize a visible menu
+            // (never interfere while hiding/destroying the window)
             WINDOWPOS* wp = (WINDOWPOS*)l;
-            if (!(wp->flags & SWP_NOSIZE) && g_menuW > 0 && g_menuH > 0) {
+            if (!g_shuttingDown && IsWindowVisible(h) && !(wp->flags & (SWP_NOSIZE | SWP_HIDEWINDOW)) &&
+                g_menuW > 0 && g_menuH > 0 && wp->cx > 0 && wp->cy > 0) {
                 wp->cx = g_menuW;
                 wp->cy = g_menuH;
             }
@@ -1273,6 +1277,7 @@ void trayMenu() {
 }
 
 LRESULT CALLBACK mainProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (g_shuttingDown && m >= WM_APP) return 0;
     if (m == g_taskbarCreated && g_taskbarCreated) {
         addTrayIcon();
         return 0;
@@ -1467,9 +1472,16 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     }
 
     // ---- shutdown
+    g_shuttingDown = true;
+    if (g_menu) ShowWindow(g_menu, SW_HIDE);
     g_shared.quit = true;
     if (overlay) {
-        WaitForSingleObject(overlay, 2000);
+        // pump messages while waiting so cross-thread window messages cannot stall the join
+        const double until = nowSec() + 2.5;
+        while (MsgWaitForMultipleObjects(1, &overlay, FALSE, 30, QS_ALLINPUT) != WAIT_OBJECT_0 && nowSec() < until) {
+            MSG m;
+            while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&m);
+        }
         CloseHandle(overlay);
     }
     if (g_cursorsHidden) restoreSystemCursors();

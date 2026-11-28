@@ -1,6 +1,6 @@
 # Vortex Crosshair
 
-A 1:1 clone of your spinning crosshair (four pink-and-white diamond blades, a white centre dot and a soft white glow) as a crosshair overlay for Windows. It sits on your mouse cursor, follows it, spins, and comes with a glass settings menu that you open with **Right Shift**.
+A 1:1 clone of your spinning crosshair (four pink-and-white diamond blades, a white centre dot and a soft white glow) as a crosshair overlay for Windows. It sits on your mouse cursor, follows it, spins, and comes with a premium frosted-glass settings menu that you open with **Right Shift**.
 
 ![Settings menu](assets/menu.png)
 
@@ -40,10 +40,11 @@ The crosshair was rebuilt from your screenshot pixel by pixel. A model of the sh
 | **Settings** | Follow cursor or screen centre, X/Y nudge, hide the Windows cursor (the crosshair becomes your pointer), hide from screen capture (OBS, Discord, screenshots), start with Windows, rebind the menu key, and an optional show/hide-crosshair key |
 
 The menu also has:
-- a live, pixel-exact preview (1×/2×/4× zoom) on four test backgrounds
+- a live, pixel-exact preview (1×/2×/4× zoom) on four test backgrounds (*Studio, Dusk, Snow, Grid*), framed by a slowly travelling light
 - eight one-click themes: *Original, Sakura, Glacier, Toxic, Inferno, Royal, Gold, Ghost*
 - a **Reset to original** button
-- an accent colour that follows your crosshair colour
+- an accent colour that follows your crosshair colour: the aurora glow behind the glass, sliders, switches and the wordmark all re-tint when you change it
+- colour-coded section icons with live values (size, spin speed, glow…), spring-animated switches and selectors, click ripples, tooltips, a staggered open animation and a "Saved" indicator
 
 Settings save automatically to `%APPDATA%\VortexCrosshair\settings.ini`. Delete that file to go back to the defaults.
 
@@ -53,7 +54,7 @@ The overlay is a click-through, always-on-top layered window that's redrawn once
 
 ## Build from source
 
-The app is plain C++17 and Win32, with a software renderer, no external dependencies, and a single static exe of about 0.7 MB. It cross-compiles from Linux with MinGW-w64:
+The app is plain C++17 and Win32, with a software renderer, no external dependencies, and a single static exe of about 0.8 MB. It cross-compiles from Linux with MinGW-w64:
 
 ```bash
 sudo apt install g++-mingw-w64-x86-64-posix mingw-w64
@@ -65,7 +66,7 @@ sudo apt install g++-mingw-w64-x86-64-posix mingw-w64
 | --- | --- |
 | `src/crosshair.*` | the crosshair model and renderer (exact-area anti-aliasing and pre-computed glow field) |
 | `src/canvas.*` | anti-aliased 2D rasteriser and text (stb_truetype with an embedded Inter subset) |
-| `src/ui.*` | the glass settings panel (immediate-mode widgets, animations) |
+| `src/ui.*` | the glass settings panel (immediate-mode widgets, springs, ripples; static layers are cached so redraws stay cheap) |
 | `src/settings.*` | settings, themes, INI persistence |
 | `src/main_win32.cpp` | overlay thread, menu window (DWM acrylic/Mica), hotkeys, tray, autostart |
 

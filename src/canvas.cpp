@@ -4,6 +4,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#if defined(__SSE2__) || defined(_M_X64)
+#include <emmintrin.h>
+#define VX_SSE2 1
+#endif
 
 #define STB_TRUETYPE_IMPLEMENTATION
 #define STBTT_STATIC
@@ -42,17 +46,6 @@ RGBA hexc(uint32_t rgb, float a) {
     return RGBA{((rgb >> 16) & 255) / 255.f, ((rgb >> 8) & 255) / 255.f, (rgb & 255) / 255.f, a};
 }
 
-RGBA mix(const RGBA& a, const RGBA& b, float t) {
-    return RGBA{a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t, a.a + (b.a - a.a) * t};
-}
-
-float sdRoundRect(float px, float py, float cx, float cy, float hw, float hh, float r) {
-    const float qx = std::fabs(px - cx) - (hw - r);
-    const float qy = std::fabs(py - cy) - (hh - r);
-    const float ox = qx > 0 ? qx : 0, oy = qy > 0 ? qy : 0;
-    const float inside = std::min(std::max(qx, qy), 0.f);
-    return std::sqrt(ox * ox + oy * oy) + inside - r;
-}
 
 void Canvas::attach(uint32_t* p, int width, int height, int strideInPixels) {
     px = p;
@@ -109,55 +102,59 @@ void Canvas::clearRect(int x0, int y0, int x1, int y1, uint32_t v) {
     for (int y = y0; y < y1; ++y) std::fill(px + (size_t)y * stride + x0, px + (size_t)y * stride + x1, v);
 }
 
-void Canvas::blend(int x, int y, float r, float g, float b, float a) {
-    uint32_t& d = px[(size_t)y * stride + x];
-    const float ia = 1.f - a;
-    const float db = (float)(d & 255), dg = (float)((d >> 8) & 255), dr = (float)((d >> 16) & 255),
-                da = (float)(d >> 24);
-    int ob = (int)(b * 255.f + db * ia + 0.5f);
-    int og = (int)(g * 255.f + dg * ia + 0.5f);
-    int orr = (int)(r * 255.f + dr * ia + 0.5f);
-    int oa = (int)(a * 255.f + da * ia + 0.5f);
-    ob = ob > 255 ? 255 : (ob < 0 ? 0 : ob);
-    og = og > 255 ? 255 : (og < 0 ? 0 : og);
-    orr = orr > 255 ? 255 : (orr < 0 ? 0 : orr);
-    oa = oa > 255 ? 255 : (oa < 0 ? 0 : oa);
-    d = (uint32_t)ob | ((uint32_t)og << 8) | ((uint32_t)orr << 16) | ((uint32_t)oa << 24);
+namespace {
+// Integer "over" of one premultiplied pixel.
+inline uint32_t overPixel(uint32_t dv, uint32_t sp) {
+    const uint32_t sa = sp >> 24;
+    if (sa == 255) return sp;
+    const uint32_t ia = 255 - sa;
+    uint32_t rb = (dv & 0x00FF00FFu) * ia + 0x00800080u;
+    rb = ((rb + ((rb >> 8) & 0x00FF00FFu)) >> 8) & 0x00FF00FFu;
+    uint32_t ag = ((dv >> 8) & 0x00FF00FFu) * ia + 0x00800080u;
+    ag = (ag + ((ag >> 8) & 0x00FF00FFu)) & 0xFF00FF00u;
+    const uint32_t dd = rb | ag;
+    uint32_t c0 = (sp & 255) + (dd & 255), c1 = ((sp >> 8) & 255) + ((dd >> 8) & 255);
+    uint32_t c2 = ((sp >> 16) & 255) + ((dd >> 16) & 255), c3 = (sp >> 24) + (dd >> 24);
+    c0 = c0 > 255 ? 255 : c0;
+    c1 = c1 > 255 ? 255 : c1;
+    c2 = c2 > 255 ? 255 : c2;
+    c3 = c3 > 255 ? 255 : c3;
+    return c0 | (c1 << 8) | (c2 << 16) | (c3 << 24);
 }
 
-namespace {
-// Fast integer "over" for a run of fully covered pixels.
+// Fast integer "over" for a run of fully covered pixels (constant colour).
 inline void blendRun(uint32_t* p, int n, float r, float g, float b, float a) {
     const uint32_t sa = (uint32_t)(a * 255.f + 0.5f);
-    if (sa == 0) return;
+    if (sa == 0 || n <= 0) return;
     const uint32_t sr = (uint32_t)(r * 255.f + 0.5f), sg = (uint32_t)(g * 255.f + 0.5f),
                    sb = (uint32_t)(b * 255.f + 0.5f);
-    const uint32_t src = sb | (sg << 8) | (sr << 16) | (sa << 24);
+    const uint32_t src = std::min(sb, sa) | (std::min(sg, sa) << 8) | (std::min(sr, sa) << 16) | (sa << 24);
     if (sa >= 255) {
         std::fill(p, p + n, src);
         return;
     }
-    const uint32_t ia = 255 - sa;
-    for (int i = 0; i < n; ++i) {
-        const uint32_t d = p[i];
-        uint32_t rb = (d & 0x00FF00FFu) * ia + 0x00800080u;
-        rb = ((rb + ((rb >> 8) & 0x00FF00FFu)) >> 8) & 0x00FF00FFu;
-        uint32_t ag = ((d >> 8) & 0x00FF00FFu) * ia + 0x00800080u;
-        ag = (ag + ((ag >> 8) & 0x00FF00FFu)) & 0xFF00FF00u;
-        // channel-wise saturating add
-        uint32_t o = 0;
-        for (int sh = 0; sh < 32; sh += 8) {
-            uint32_t c = ((src >> sh) & 255) + (((rb | ag) >> sh) & 255);
-            o |= (c > 255 ? 255 : c) << sh;
-        }
-        p[i] = o;
+    int i = 0;
+#ifdef VX_SSE2
+    const __m128i zero = _mm_setzero_si128();
+    const __m128i vsrc = _mm_unpacklo_epi8(_mm_set1_epi32((int)src), zero);
+    const __m128i via = _mm_set1_epi16((short)(255 - sa));
+    const __m128i r128 = _mm_set1_epi16(128);
+    for (; i + 4 <= n; i += 4) {
+        const __m128i d = _mm_loadu_si128((const __m128i*)(p + i));
+        __m128i lo = _mm_add_epi16(_mm_mullo_epi16(_mm_unpacklo_epi8(d, zero), via), r128);
+        __m128i hi = _mm_add_epi16(_mm_mullo_epi16(_mm_unpackhi_epi8(d, zero), via), r128);
+        lo = _mm_srli_epi16(_mm_add_epi16(lo, _mm_srli_epi16(lo, 8)), 8);
+        hi = _mm_srli_epi16(_mm_add_epi16(hi, _mm_srli_epi16(hi, 8)), 8);
+        _mm_storeu_si128((__m128i*)(p + i), _mm_packus_epi16(_mm_add_epi16(lo, vsrc), _mm_add_epi16(hi, vsrc)));
     }
+#endif
+    for (; i < n; ++i) p[i] = overPixel(p[i], src);
 }
 
 struct SolidPaint {
     float r, g, b, a;  // premultiplied
     void at(int, int, float& R, float& G, float& B, float& A) const { R = r; G = g; B = b; A = a; }
-    bool solid() const { return true; }
+    bool rowConst() const { return true; }
 };
 
 struct GradPaint {
@@ -172,7 +169,7 @@ struct GradPaint {
         B = (c0.b + (c1.b - c0.b) * t) * a;
         A = a;
     }
-    bool solid() const { return false; }
+    bool rowConst() const { return vertical; }
 };
 
 template <class P>
@@ -202,12 +199,15 @@ void rasterRoundRect(Canvas& cv, const Rc& r, float radius, const P& paint) {
             }
         }
         uint32_t* row = cv.px + (size_t)y * cv.stride;
+        const bool rc = paint.rowConst();
+        float RR = 0, GG = 0, BB = 0, AA = 0;
+        if (rc) paint.at(x0, y, RR, GG, BB, AA);
         auto edge = [&](int x) {
             const float d = sdRoundRect(x + 0.5f, py, cx, cy, hw, hh, rad);
             const float cov = clamp01(0.5f - d) * ga;
             if (cov <= 0.f) return;
-            float R, G, B, A;
-            paint.at(x, y, R, G, B, A);
+            float R = RR, G = GG, B = BB, A = AA;
+            if (!rc) paint.at(x, y, R, G, B, A);
             cv.blend(x, y, R * cov, G * cov, B * cov, A * cov);
         };
         if (xs > xe) {
@@ -215,10 +215,8 @@ void rasterRoundRect(Canvas& cv, const Rc& r, float radius, const P& paint) {
             continue;
         }
         for (int x = x0; x < xs; ++x) edge(x);
-        if (paint.solid()) {
-            float R, G, B, A;
-            paint.at(0, y, R, G, B, A);
-            blendRun(row + xs, xe - xs + 1, R * ga, G * ga, B * ga, A * ga);
+        if (rc) {
+            blendRun(row + xs, xe - xs + 1, RR * ga, GG * ga, BB * ga, AA * ga);
         } else {
             for (int x = xs; x <= xe; ++x) {
                 float R, G, B, A;
@@ -391,24 +389,95 @@ void Canvas::fillPoly(const float* xy, int n, const RGBA& c) {
 void Canvas::shadow(const Rc& r, float radius, float blur, const RGBA& c, float dy, float spread) {
     const float sigma = std::max(0.5f, blur * 0.5f);
     const Rc s{r.x - spread, r.y - spread + dy, r.w + 2 * spread, r.h + 2 * spread};
-    const float ext = sigma * 3.f;
+    const float ext = sigma * 2.6f;
     int x0 = std::max(clipX0, (int)std::floor(s.x - ext)), y0 = std::max(clipY0, (int)std::floor(s.y - ext));
     int x1 = std::min(clipX1, (int)std::ceil(s.r() + ext)), y1 = std::min(clipY1, (int)std::ceil(s.b() + ext));
+    if (x0 >= x1 || y0 >= y1) return;
     const float hw = s.w * 0.5f, hh = s.h * 0.5f, cx = s.cx(), cy = s.cy();
-    const float rad = std::min({radius + spread, hw, hh});
+    const float rad = std::max(0.f, std::min({radius + spread, hw, hh}));
     const float ohw = r.w * 0.5f, ohh = r.h * 0.5f, ocx = r.cx(), ocy = r.cy();
-    const float orad = std::min({radius, ohw, ohh});
-    const float inv = 1.f / (sigma * 1.41421356f);
+    const float orad = std::max(0.f, std::min({radius, ohw, ohh}));
+    const bool same = dy == 0.f && spread == 0.f;
     const float A = c.a * globalAlpha;
-    for (int y = y0; y < y1; ++y)
+    if (A <= 0.f) return;
+    // gaussian edge profile as a lookup table over the signed distance
+    constexpr int N = 96;
+    float lut[N + 2];
+    const float inv = 1.f / (sigma * 1.41421356f);
+    for (int i = 0; i <= N + 1; ++i) {
+        const float d = -ext + 2.f * ext * (float)i / N;
+        lut[i] = 0.5f * (1.f - erfApprox(d * inv)) * A;
+    }
+    const float toLut = N / (2.f * ext);
+    const float cr = c.r * 255.f, cg = c.g * 255.f, cb = c.b * 255.f;
+    if (rad <= sigma * 1.6f) {
+        // Gaussian blur of a box is separable: alpha = Fx(x) * Fy(y). For corner
+        // radii that are small next to the blur the rounding is invisible, and this
+        // costs one multiply per pixel instead of a distance field evaluation.
+        static thread_local std::vector<float> fx, fy;
+        fx.resize((size_t)(x1 - x0));
+        fy.resize((size_t)(y1 - y0));
         for (int x = x0; x < x1; ++x) {
-            const float pxc = x + 0.5f, pyc = y + 0.5f;
-            const float covShape = clamp01(0.5f - sdRoundRect(pxc, pyc, ocx, ocy, ohw, ohh, orad));
-            if (covShape >= 1.f) continue;
+            const float p = x + 0.5f;
+            fx[x - x0] = 0.5f * (erfApprox((p - s.x) * inv) - erfApprox((p - s.r()) * inv));
+        }
+        for (int y = y0; y < y1; ++y) {
+            const float p = y + 0.5f;
+            fy[y - y0] = 0.5f * (erfApprox((p - s.y) * inv) - erfApprox((p - s.b()) * inv)) * A;
+        }
+        const int bx0 = (int)std::floor(r.x) - 1, bx1 = (int)std::ceil(r.r()) + 1;
+        const int by0 = (int)std::floor(r.y) - 1, by1 = (int)std::ceil(r.b()) + 1;
+        for (int y = y0; y < y1; ++y) {
+            const float pyc = y + 0.5f;
+            const float ay = fy[y - y0];
+            if (ay < 0.002f) continue;
+            int xs = 1, xe = 0;
+            const bool inner = roundRectFullSpan(pyc, ocx, ocy, ohw, ohh, orad, xs, xe);
+            const bool rowNearShape = y >= by0 && y < by1;
+            for (int x = x0; x < x1; ++x) {
+                if (inner && x >= xs && x <= xe) {
+                    x = xe;
+                    continue;
+                }
+                float a = ay * fx[x - x0];
+                if (a < 0.002f) continue;
+                if (rowNearShape && x >= bx0 && x < bx1) {
+                    const float covShape = clamp01(0.5f - sdRoundRect(x + 0.5f, pyc, ocx, ocy, ohw, ohh, orad));
+                    a *= 1.f - covShape;
+                    if (a < 0.002f) continue;
+                }
+                const uint32_t ia8 = (uint32_t)(a * 255.f + 0.5f);
+                if (!ia8) continue;
+                uint32_t& dp = px[(size_t)y * stride + x];
+                dp = overPixel(dp, (std::min(ia8, (uint32_t)(cb * a + 0.5f))) |
+                                       (std::min(ia8, (uint32_t)(cg * a + 0.5f)) << 8) |
+                                       (std::min(ia8, (uint32_t)(cr * a + 0.5f)) << 16) | (ia8 << 24));
+            }
+        }
+        return;
+    }
+    for (int y = y0; y < y1; ++y) {
+        const float pyc = y + 0.5f;
+        int xs = 1, xe = 0;  // shadow is hidden under the (opaque-looking) shape itself
+        const bool inner = roundRectFullSpan(pyc, ocx, ocy, ohw, ohh, orad, xs, xe);
+        for (int x = x0; x < x1; ++x) {
+            if (inner && x >= xs && x <= xe) {
+                x = xe;
+                continue;
+            }
+            const float pxc = x + 0.5f;
             const float d = sdRoundRect(pxc, pyc, cx, cy, hw, hh, rad);
-            const float a = 0.5f * (1.f - erfApprox(d * inv)) * A * (1.f - covShape);
+            if (d >= ext) continue;
+            const float ds = same ? d : sdRoundRect(pxc, pyc, ocx, ocy, ohw, ohh, orad);
+            const float covShape = clamp01(0.5f - ds);
+            if (covShape >= 1.f) continue;
+            const float fi = (std::max(d, -ext) + ext) * toLut;
+            const int i0 = (int)fi;
+            const float fr = fi - (float)i0;
+            const float a = (lut[i0] + (lut[i0 + 1] - lut[i0]) * fr) * (1.f - covShape);
             if (a > 0.002f) blend(x, y, c.r * a, c.g * a, c.b * a, a);
         }
+    }
 }
 
 void Canvas::glowBlob(float x, float y, float rx, float ry, const RGBA& c) {
@@ -425,6 +494,50 @@ void Canvas::glowBlob(float x, float y, float rx, float ry, const RGBA& c) {
             a *= clamp01((2.56f - d2) * 2.f);
             if (a > 0.001f) blend(xx, yy, c.r * a, c.g * a, c.b * a, a);
         }
+}
+
+void Canvas::drawImage(const uint32_t* src, int sw, int sh, int sstride, int dx, int dy) {
+    const int x0 = std::max(clipX0, dx), y0 = std::max(clipY0, dy);
+    const int x1 = std::min(clipX1, dx + sw), y1 = std::min(clipY1, dy + sh);
+    if (x0 >= x1 || y0 >= y1) return;
+    const uint32_t ga = (uint32_t)(std::max(0.f, std::min(1.f, globalAlpha)) * 256.f + 0.5f);
+    if (ga == 0) return;
+    for (int y = y0; y < y1; ++y) {
+        const uint32_t* s = src + (size_t)(y - dy) * sstride + (x0 - dx);
+        uint32_t* d = px + (size_t)y * stride + x0;
+        int n = x1 - x0, i = 0;
+#ifdef VX_SSE2
+        if (ga >= 256) {
+            const __m128i zero = _mm_setzero_si128();
+            const __m128i c255 = _mm_set1_epi16(255), r128 = _mm_set1_epi16(128);
+            for (; i + 4 <= n; i += 4) {
+                const __m128i sv = _mm_loadu_si128((const __m128i*)(s + i));
+                const __m128i dv = _mm_loadu_si128((const __m128i*)(d + i));
+                const __m128i slo = _mm_unpacklo_epi8(sv, zero), shi = _mm_unpackhi_epi8(sv, zero);
+                // broadcast each pixel's alpha to its four 16-bit lanes and invert
+                __m128i alo = _mm_shufflehi_epi16(_mm_shufflelo_epi16(slo, 0xFF), 0xFF);
+                __m128i ahi = _mm_shufflehi_epi16(_mm_shufflelo_epi16(shi, 0xFF), 0xFF);
+                alo = _mm_sub_epi16(c255, alo);
+                ahi = _mm_sub_epi16(c255, ahi);
+                __m128i lo = _mm_add_epi16(_mm_mullo_epi16(_mm_unpacklo_epi8(dv, zero), alo), r128);
+                __m128i hi = _mm_add_epi16(_mm_mullo_epi16(_mm_unpackhi_epi8(dv, zero), ahi), r128);
+                lo = _mm_srli_epi16(_mm_add_epi16(lo, _mm_srli_epi16(lo, 8)), 8);
+                hi = _mm_srli_epi16(_mm_add_epi16(hi, _mm_srli_epi16(hi, 8)), 8);
+                _mm_storeu_si128((__m128i*)(d + i), _mm_packus_epi16(_mm_add_epi16(lo, slo), _mm_add_epi16(hi, shi)));
+            }
+        }
+#endif
+        for (; i < n; ++i) {
+            uint32_t sp = s[i];
+            if (ga < 256) {  // scale all four premultiplied channels
+                const uint32_t rb = ((sp & 0x00FF00FFu) * ga >> 8) & 0x00FF00FFu;
+                const uint32_t ag = (((sp >> 8) & 0x00FF00FFu) * ga) & 0xFF00FF00u;
+                sp = rb | ag;
+            }
+            if ((sp >> 24) == 0) continue;
+            d[i] = overPixel(d[i], sp);
+        }
+    }
 }
 
 void Canvas::blit(const uint32_t* src, int sw, int sh, int sstride, int dx, int dy, int scale) {
@@ -598,6 +711,54 @@ float TextEngine::draw(Canvas& c, int face, float size, float x, float y, const 
                     const uint8_t v = src[xx - gx0];
                     if (!v) continue;
                     const float a = lut[v] * A;
+                    c.blend(xx, yy, col.r * a, col.g * a, col.b * a, a);
+                }
+            }
+        }
+        pen += adv * scale + tracking;
+        prev = gid;
+    }
+    return pen - x;
+}
+
+float TextEngine::drawGradient(Canvas& c, int face, float size, float x, float y, const std::string& s, const RGBA& c0,
+                               const RGBA& c1, float tracking) {
+    if (faces_.empty() && !init()) return 0.f;
+    const float w = std::max(1.f, measure(face, size, s, tracking));
+    Face* f = faces_[face];
+    const float scale = f->emScale1 * size;
+    const int by = (int)std::floor(y + 0.5f);
+    static float lut[256];
+    static bool lutInit = false;
+    if (!lutInit) {
+        for (int i = 0; i < 256; ++i) lut[i] = std::pow(i / 255.f, 0.80f);
+        lutInit = true;
+    }
+    float pen = x;
+    int prev = -1;
+    size_t i = 0;
+    while (i < s.size()) {
+        const uint32_t cp = utf8Next(s, i);
+        const int gid = f->gid(cp);
+        if (prev >= 0) pen += stbtt_GetGlyphKernAdvance(&f->info, prev, gid) * scale;
+        int adv, lsb;
+        stbtt_GetGlyphHMetrics(&f->info, gid, &adv, &lsb);
+        const float fl = std::floor(pen);
+        int sub = (int)((pen - fl) * 4.f + 0.5f);
+        int ix = (int)fl;
+        if (sub == 4) { sub = 0; ++ix; }
+        const Glyph& g = glyph(face, gid, size, sub);
+        if (g.w > 0) {
+            const int gx0 = ix + g.x0, gy0 = by + g.y0;
+            const int sx0 = std::max(c.clipX0, gx0), sy0 = std::max(c.clipY0, gy0);
+            const int sx1 = std::min(c.clipX1, gx0 + g.w), sy1 = std::min(c.clipY1, gy0 + g.h);
+            for (int yy = sy0; yy < sy1; ++yy) {
+                const uint8_t* src = &g.a[(size_t)(yy - gy0) * g.w];
+                for (int xx = sx0; xx < sx1; ++xx) {
+                    const uint8_t v = src[xx - gx0];
+                    if (!v) continue;
+                    const RGBA col = mix(c0, c1, std::max(0.f, std::min(1.f, (xx + 0.5f - x) / w)));
+                    const float a = lut[v] * col.a * c.globalAlpha;
                     c.blend(xx, yy, col.r * a, col.g * a, col.b * a, a);
                 }
             }
