@@ -636,6 +636,8 @@ DWORD WINAPI overlayThread(void*) {
     double lastTopmost = 0;
     float angle = 0.f, boost = 0.f;
     bool shown = false;
+    bool wasEnabled = false;
+    double appearAt = -10.0;  // fade/scale-in when the overlay is switched on
     int affinity = -1;
     int lastSize = 0;
     float lastAngle = 1e9f, lastZoom = -1.f;
@@ -768,6 +770,10 @@ DWORD WINAPI overlayThread(void*) {
         p.y += st.offsetY;
         const bool overMenu = menuOpen && PtInRect(&menuRect, cursor);
         const bool visible = st.enabled && !overMenu;
+        if (st.enabled && !wasEnabled) appearAt = t;  // app start or switched on
+        wasEnabled = st.enabled;
+        const float ap = (float)std::min(1.0, std::max(0.0, (t - appearAt) / 0.32));
+        const float appear = 1.f - (1.f - ap) * (1.f - ap) * (1.f - ap);
 
         // ---- click reaction + spin
         const bool lmb = keyDown(VK_LBUTTON);
@@ -779,7 +785,7 @@ DWORD WINAPI overlayThread(void*) {
         if (st.clickReact == REACT_SPIN) speed += (speed > 0.f ? speed : 180.f) * 2.f * boost;
         angle += (st.spinDir == 0 ? 1.f : -1.f) * speed * (kPi / 180.f) * dt;
         angle = std::fmod(angle, 2.f * kPi);
-        const float zoom = st.clickReact == REACT_PULSE ? 1.f + 0.18f * boost : 1.f;
+        const float zoom = (st.clickReact == REACT_PULSE ? 1.f + 0.18f * boost : 1.f) * (0.7f + 0.3f * appear);
 
         if (!visible) {
             if (shown) {
@@ -797,12 +803,15 @@ DWORD WINAPI overlayThread(void*) {
         }
 
         // ---- render
-        const CrosshairStyle cs = effectiveStyle(st, t);
+        CrosshairStyle cs = effectiveStyle(st, t);
+        cs.opacity *= appear;
+        const bool appearing = appear < 1.f;
         renderer.prepare(cs);
         const int half = (int)std::ceil(renderer.extent() * 1.2f) + 2;
         const int size = half * 2;
         if (!dib.ensure(size)) continue;
-        const bool needRender = forceRender || st.rainbow || angle != lastAngle || zoom != lastZoom || size != lastSize;
+        const bool needRender =
+            forceRender || appearing || st.rainbow || angle != lastAngle || zoom != lastZoom || size != lastSize;
         if (needRender) {
             for (int y = 0; y < size; ++y) std::memset(dib.bits + (size_t)y * dib.size, 0, (size_t)size * 4);
             renderer.render(dib.bits, size, size, dib.size, (float)half, (float)half, angle, cs, 0, 0, size, size, zoom);

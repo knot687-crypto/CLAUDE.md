@@ -1,6 +1,6 @@
 # Vortex Crosshair
 
-A 1:1 clone of your spinning crosshair (four pink-and-white diamond blades, a white centre dot and a soft white glow) as a crosshair overlay for Windows. It sits on your mouse cursor, follows it, spins, and comes with a premium frosted-glass settings menu that you open with **Right Shift**.
+A 1:1 clone of your spinning crosshair (four pink-and-white diamond blades, a white centre dot and a soft white glow) as a crosshair overlay for Windows. It sits on your mouse cursor, follows it, spins, and comes with a clean, premium settings menu that you open with **Right Shift**.
 
 ![Settings menu](assets/menu.png)
 
@@ -33,18 +33,16 @@ The crosshair was rebuilt from your screenshot pixel by pixel. A model of the sh
 
 | Page | What you can change |
 | --- | --- |
-| **Colors** | Separate colours for blades, outline, centre dot and glow, using a saturation/value field, hue and alpha sliders, hex input (`#RRGGBB` or `#RRGGBBAA`), copy button and 12 quick swatches. *Rainbow cycle* is optional. |
+| **Style** | Presets, then separate colours for blades, outline, centre dot and glow, using a saturation/value field, hue and alpha sliders, hex input (`#RRGGBB` or `#RRGGBBAA`), copy button and 12 quick swatches. *Rainbow cycle* is optional. |
 | **Shape** | Size (50–400%), blade length, width, centre gap, outline thickness (or no outline), centre dot size, 2/3/4/5/6/8 blades |
 | **Motion** | Spin on/off, speed (0–1080°/s) plus *Chill / Smooth / Fast / Turbo* presets, direction, and a click reaction (*Spin boost* or *Pulse* while you hold the mouse button) |
 | **Effects** | Glow strength and spread, dot halo, contrast shadow (keeps it visible on bright scenes), opacity |
-| **Settings** | Follow cursor or screen centre, X/Y nudge, hide the Windows cursor (the crosshair becomes your pointer), hide from screen capture (OBS, Discord, screenshots), start with Windows, rebind the menu key, and an optional show/hide-crosshair key |
+| **General** | Follow cursor or screen centre, X/Y nudge, hide the Windows cursor (the crosshair becomes your pointer), hide from screen capture (OBS, Discord, screenshots), start with Windows, rebind the menu key, and an optional show/hide-crosshair key |
 
-The menu also has:
-- a live, pixel-exact preview (1×/2×/4× zoom) on four test backgrounds (*Studio, Dusk, Snow, Grid*), framed by a slowly travelling light
-- eight one-click themes: *Original, Sakura, Glacier, Toxic, Inferno, Royal, Gold, Ghost*
-- a **Reset to original** button
-- an accent colour that follows your crosshair colour: the aurora glow behind the glass, sliders, switches and the wordmark all re-tint when you change it
-- colour-coded section icons with live values (size, spin speed, glow…), spring-animated switches and selectors, click ripples, tooltips, a staggered open animation and a "Saved" indicator
+The menu is calm and focused: a neutral dark surface (Windows 11 acrylic shows through subtly), with your crosshair as the only colour, spinning on a large stage.
+- **Stage:** shows the crosshair **Enlarged** (re-rendered crisp at size) or at **1:1**, its true on-screen pixel size, on four backgrounds: *Studio, Dusk, Daylight, Reticle*. Hold the mouse on it to try your click reaction.
+- **Opening:** opening the menu plays a short intro. The crosshair spins up and settles while a faint ring expands from it, and the settings fade in row by row. The crosshair on your cursor also fades in when you switch it on.
+- **Presets:** eight one-click colour sets with live thumbnails (*Original, Sakura, Glacier, Toxic, Inferno, Royal, Gold, Ghost*), plus **Reset to original**.
 
 Settings save automatically to `%APPDATA%\VortexCrosshair\settings.ini`. Delete that file to go back to the defaults.
 
@@ -66,7 +64,7 @@ sudo apt install g++-mingw-w64-x86-64-posix mingw-w64
 | --- | --- |
 | `src/crosshair.*` | the crosshair model and renderer (exact-area anti-aliasing and pre-computed glow field) |
 | `src/canvas.*` | anti-aliased 2D rasteriser and text (stb_truetype with an embedded Inter subset) |
-| `src/ui.*` | the glass settings panel (immediate-mode widgets, springs, ripples; static layers are cached so redraws stay cheap) |
+| `src/ui.*` | the settings panel (immediate-mode widgets, stage preview, opening sequence; static layers are cached so redraws stay cheap) |
 | `src/settings.*` | settings, themes, INI persistence |
 | `src/main_win32.cpp` | overlay thread, menu window (DWM acrylic/Mica), hotkeys, tray, autostart |
 

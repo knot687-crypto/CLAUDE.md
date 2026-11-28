@@ -1,4 +1,4 @@
-// Vortex Crosshair - immediate mode glass settings panel (portable)
+// Vortex Crosshair - settings panel (immediate mode, software rendered, portable)
 #pragma once
 #include <cstdint>
 #include <string>
@@ -42,14 +42,13 @@ struct AppStatus {
     int  capturing = 0;          // 1 menu key, 2 toggle key (waiting for a key press)
     bool glassBackdrop = true;   // OS blur active behind the window
     int  glassLevel = 2;         // 0 none, 1 plain blur (Win10), 2 acrylic/mica (Win11)
-    float crosshairAngle = 0.f;  // live angle from the overlay (radians)
-    std::string version = "1.1.0";
+    std::string version = "1.2.0";
 };
 
 class SettingsPanel {
 public:
     static constexpr float kWidth = 960.f;   // DIPs
-    static constexpr float kHeight = 620.f;
+    static constexpr float kHeight = 640.f;
 
     // Builds and draws one frame. `scale` = DPI scale (1.0 at 96 DPI).
     void frame(Canvas& cv, float scale, const UIInput& in, Settings& st, UIActions& out, const AppStatus& status);
@@ -57,23 +56,22 @@ public:
     bool animating() const { return animating_ || previewAnimating_; }
     // Region of the window that changed in the last frame (window pixels).
     Rc dirtyRect() const { return dirty_; }
-    // Hit test for the window drag area (header without buttons), in window pixels.
+    // Hit test for the window drag area (top bar without controls), in window pixels.
     bool dragArea(float x, float y) const;
     // Force the next frame to be a full redraw.
     void invalidate() { fullDirty_ = true; }
     void resetInteraction();
-    // Call when the menu is shown: plays the entrance animation.
-    void onOpen(double time) { openTime_ = time; fullDirty_ = true; }
+    // Call when the menu is shown: plays the opening sequence.
+    void onOpen(double time) {
+        openTime_ = time;
+        fullDirty_ = true;
+    }
     // A text field currently has keyboard focus (Esc should not close the menu).
     bool textFocused() const { return focus_ != 0; }
 
 private:
     struct Spring {
         float x = 0, v = 0;
-    };
-    struct Ripple {
-        double t0 = -10;
-        float x = 0, y = 0;
     };
     struct ImageCache {  // pre-rendered static image (premultiplied BGRA)
         std::vector<uint32_t> px;
@@ -97,29 +95,24 @@ private:
     std::string lastSettings_;
     double armedAt_ = -10.0;
     double openTime_ = -10.0;
-    double lastChange_ = -10.0;
     bool bindHovered_ = false;
     std::vector<Rc> headerHits_;
     std::unordered_map<uint32_t, float> anim_;
     std::unordered_map<uint32_t, Spring> springs_;
-    std::unordered_map<uint32_t, Ripple> ripples_;
-    RGBA accent_{}, accentDeep_{}, accentText_{}, accentAlt_{};
     double pageSwitchTime_ = -10.0;
     int prevPage_ = 0;
+    int rowIndex_ = 0;      // entrance cascade counter for the current page
+    float rowBase_ = 0.f;   // base delay of the cascade (seconds since open/page switch)
     // tooltip
     uint32_t tipId_ = 0;
     double tipStart_ = 0;
     std::string tipText_;
     Rc tipAnchor_{};
     bool tipWanted_ = false;
-    // cached static glass background and gradient images
+    // caches
     std::vector<uint32_t> bgCache_;
     std::string bgKey_;
-    ImageCache pvBgCache_, svCache_, hueCache_, alphaCache_;
-    // static decorations (cards, preview shadow) baked on top of the glass for the current page
-    std::vector<uint32_t> bakeCache_;
-    std::string bakeKey_;
-    bool baking_ = false, cardsBaked_ = false;
+    ImageCache stageCache_, svCache_, hueCache_, alphaCache_;
     // colour picker state (kept in HSV so hue survives grey colours)
     float pickH_ = 0, pickS_ = 0, pickV_ = 1;
     RGBA pickLast_{-1, -1, -1, -1};
@@ -130,58 +123,60 @@ private:
     bool hexSelectAll_ = false;
     double caretTime_ = 0;
     // previews
-    CrosshairRenderer previewRenderer_, chipRenderer_, logoRenderer_;
-    std::vector<uint32_t> previewBuf_;
+    CrosshairRenderer stageRenderer_, chipRenderer_, logoRenderer_;
     float previewAngle_ = 0.f;
-    float hoverChipAngle_[16] = {};
+    float chipAngle_[16] = {};
 
     // ---- helpers
     Rc R(float x, float y, float w, float h) const { return Rc{x * s_, y * s_, w * s_, h * s_}; }
     float S(float v) const { return v * s_; }
     float px1() const { return S(1.f) < 1.f ? 1.f : S(1.f); }
-    float anim(uint32_t id, float target, float speed = 14.f);
-    float spring(uint32_t id, float target, float stiffness = 190.f, float damping = 19.f);
+    float anim(uint32_t id, float target, float speed = 16.f);
+    float spring(uint32_t id, float target, float stiffness = 320.f, float damping = 36.f);
     bool hovered(const Rc& r) const;
     bool behave(uint32_t id, const Rc& r, bool* hover = nullptr, bool* held = nullptr);
-    void label(float x, float y, const std::string& t, float size, int face, const RGBA& c, float tracking = 0.f);
-    void changed();
-    float enter(float delay) const;  // entrance animation progress for a section
-    void ripple(uint32_t id, const Rc& r, float radius, const RGBA& c);
-    void tooltip(uint32_t id, const Rc& anchor, const std::string& text);
+    void text(float x, float y, const std::string& t, float size, int face, const RGBA& c, float tracking = 0.f);
+    void changed() { out_->settingsChanged = true; }
+    float since(double t0) const { return (float)(in_.time - t0); }
+    // entrance cascade: returns the vertical offset (DIP) for the next row and sets the fade
+    float beginRow();
+    void endRow();
+    float rowAlpha_ = 1.f, sectionAlpha_ = 1.f;
+    void tooltip(uint32_t id, const Rc& anchor, const std::string& t);
     void drawTooltip();
 
     // ---- widgets
     bool toggle(uint32_t id, const Rc& r, bool& v);
     bool slider(uint32_t id, const Rc& r, float& v, float lo, float hi, float step = 0.f);
-    bool segmented(uint32_t id, const Rc& r, const std::vector<std::string>& items, int& sel, float fontSize = 12.5f);
-    bool button(uint32_t id, const Rc& r, const std::string& text, int style = 0, int icon = -1);
-    bool iconButton(uint32_t id, const Rc& r, int icon, const std::string& tip);
-    void keycap(const Rc& r, const std::string& text, bool glowing);
+    bool segmented(uint32_t id, const Rc& r, const std::vector<std::string>& items, int& sel);
+    bool ghostButton(uint32_t id, const Rc& r, const std::string& t, int icon = -1);
+    bool iconButton(uint32_t id, const Rc& r, int icon, const std::string& tip, bool danger = false);
+    void keycap(const Rc& r, const std::string& t, bool active, bool small = false);
     void icon(int which, float cx, float cy, float size, const RGBA& c);
-    void iconTile(int which, const Rc& r, int palette, float glow);
-    void card(const Rc& r, float radius = 16.f);
-    void valuePill(float right, float y, const std::string& v);
-    void microLabel(float x, float y, const std::string& t);
-    void sliderRow(uint32_t id, float x, float y, float w, const std::string& name, const std::string& value,
-                   float& v, float lo, float hi, float step = 0.f);
-    void toggleRow(uint32_t id, float x, float y, float w, const std::string& name, const std::string& desc, bool& v);
+    void group(float x, float y, float w, float h);
+    void separator(float x, float y, float w);
+    void sectionTitle(float x, float y, const std::string& t);
+    // list rows (inside a group): label on the left, control on the right
+    void sliderRow(uint32_t id, float x, float y, float w, const std::string& name, const std::string& value, float& v,
+                   float lo, float hi, float step = 0.f);
+    void toggleRow(uint32_t id, float x, float y, float w, const std::string& name, bool& v);
+    void segmentRow(uint32_t id, float x, float y, float w, const std::string& name, const std::vector<std::string>& items,
+                    int& sel, float segW = 232.f);
 
     // ---- sections
     void buildBackground();
-    void bakeStatic();
-    void drawHeader();
-    void drawSidebar();
-    void drawPreview();
-    void drawThemes();
-    void pageColors(float x, float y, float w);
+    void drawTopBar();
+    void drawStage();
+    void drawTabs();
+    void drawFooter();
+    void pageStyle(float x, float y, float w);
     void pageShape(float x, float y, float w);
     void pageMotion(float x, float y, float w);
     void pageEffects(float x, float y, float w);
-    void pageSettings(float x, float y, float w);
+    void pageGeneral(float x, float y, float w);
     void colorPicker(float x, float y, float w, RGBA& color);
     void hexField(uint32_t id, const Rc& r, RGBA& color);
-    void computeAccent();
-    void paintPreviewBackground(Canvas& cv, const Rc& r, int bg);
+    void paintStage(Canvas& cv, const Rc& r, int bg);
     template <class F>
     void cachedImage(ImageCache& c, const char* tag, const Rc& r, const std::string& key, F&& paint);
 };

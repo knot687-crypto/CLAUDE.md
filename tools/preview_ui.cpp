@@ -74,6 +74,8 @@ int main(int argc, char** argv) {
     st.page = page;
     if (preset > 0) applyPreset(st, preset);
     if (variant == 2) { st.previewBg = 1; st.previewZoom = 2; }
+    if (variant == 3) { st.previewBg = 2; st.previewZoom = 1; }
+    if (variant == 4) { st.previewBg = 3; st.previewZoom = 2; st.spin = false; }
     const int W = (int)std::ceil(SettingsPanel::kWidth * scale), H = (int)std::ceil(SettingsPanel::kHeight * scale);
     std::vector<uint32_t> buf((size_t)W * H, 0);
     Canvas cv;
